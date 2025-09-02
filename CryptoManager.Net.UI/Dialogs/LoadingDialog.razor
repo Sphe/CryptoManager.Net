@@ -1,0 +1,30 @@
+﻿@using CryptoManager.Net.UI.Models.ApiModels.Requests
+@using CryptoManager.Net.UI.Models
+@using CryptoManager.Net.UI.Services
+@using CryptoManager.Net.UI.Services.Rest
+@using System.Net
+@inject ExchangeService ExchangeService
+@inject ApiKeyService ApiKeyService
+
+<MudDialog>
+    <DialogContent>
+        <MudElement HtmlTag="div" Style="padding: 20px">
+            <LoaderComponent />
+            <MudText Align="Align.Center">@(Text ?? "...")</MudText>
+        </MudElement>
+    </DialogContent>
+</MudDialog>
+
+@code {
+    [Parameter]
+    public string? Text { get; set; }
+
+    [CascadingParameter]
+    private IMudDialogInstance? MudDialog { get; set; }
+
+    public void SetText(string text)
+    {
+        Text = text;
+        InvokeAsync(StateHasChanged);
+    }
+}

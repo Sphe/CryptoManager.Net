@@ -1,0 +1,52 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include=".http\http-client.env.json" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Azure.Monitor.OpenTelemetry.AspNetCore" Version="1.3.0" />
+    <PackageReference Include="CryptoClients.Net" Version="3.9.0" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.6" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Tools" Version="9.0.6">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CryptoManager.Net.Analyzers\CryptoManager.Net.Analyzers.csproj" />
+    <ProjectReference Include="..\CryptoManager.Net.Database\CryptoManager.Net.Database.csproj" />
+    <ProjectReference Include="..\CryptoManager.Net.Processor.AssetCalculation\CryptoManager.Net.Processor.AssetCalculation.csproj" />
+    <ProjectReference Include="..\CryptoManager.Net.Processor.FiatPrices\CryptoManager.Net.Processor.FiatPrices.csproj" />
+    <ProjectReference Include="..\CryptoManager.Net.Processor.Symbols\CryptoManager.Net.Processor.Symbols.csproj" />
+    <ProjectReference Include="..\CryptoManager.Net.Processor.Tickers\CryptoManager.Net.Processor.Tickers.csproj" />
+    <ProjectReference Include="..\CryptoManager.Net.Publisher.FiatPrices\CryptoManager.Net.Publisher.FiatPrices.csproj" />
+    <ProjectReference Include="..\CryptoManager.Net.Publisher.Symbols\CryptoManager.Net.Publisher.Symbols.csproj" />
+    <ProjectReference Include="..\CryptoManager.Net.Publisher.Tickers\CryptoManager.Net.Publisher.Tickers.csproj" />
+    <ProjectReference Include="..\CryptoManager.Net.Publish\CryptoManager.Net.Data.csproj" />
+    <ProjectReference Include="..\CryptoManager.Net.Subscriptions.OrderBook\CryptoManager.Net.Subscriptions.OrderBook.csproj" />
+    <ProjectReference Include="..\CryptoManager.Net.Subscriptions.Tickers\CryptoManager.Net.Subscriptions.Tickers.csproj" />
+    <ProjectReference Include="..\CryptoManager.Net.Subscriptions.Trades\CryptoManager.Net.Subscriptions.Trades.csproj" />
+    <ProjectReference Include="..\CryptoManager.Net.Subscriptions.User\CryptoManager.Net.Subscriptions.User.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include=".http\System.http" />
+    <None Include=".http\Trades.http" />
+    <None Include=".http\Orders.http" />
+    <None Include=".http\Balances.http" />
+    <None Include=".http\ApiKeys.http" />
+    <None Include=".http\Users.http" />
+    <None Include=".http\Assets.http" />
+    <None Include=".http\Exchanges.http" />
+    <None Include=".http\Symbols.http" />
+  </ItemGroup>
+
+</Project>

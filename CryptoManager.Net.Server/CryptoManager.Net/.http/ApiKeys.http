@@ -1,0 +1,53 @@
+
+# @name login
+POST {{HostAddress}}/users/login
+Accept: application/json
+Content-Type: application/json
+
+{
+    "email": "user1@test.com",
+    "password": "password"
+}
+
+###
+
+GET {{HostAddress}}/apikeys
+Accept: application/json
+Authorization: Bearer {{login.response.body.$.data.jwt}}
+
+###
+
+@exchange=Bitfinex
+@key=123
+@secret=456
+
+POST {{HostAddress}}/apikeys
+Accept: application/json
+Content-Type: application/json
+Authorization: Bearer {{login.response.body.$.data.jwt}}
+
+{
+  "exchange": "{{exchange}}",
+  "key": "{{key}}",
+  "secret": "{{secret}}"
+}
+
+###
+
+@id=1
+
+POST {{HostAddress}}/apikeys/validate/{{id}}
+Accept: application/json
+Content-Type: application/json
+Authorization: Bearer {{login.response.body.$.data.jwt}}
+
+###
+
+@id=1
+
+DELETE {{HostAddress}}/apikeys/{{id}}
+Accept: application/json
+Content-Type: application/json
+Authorization: Bearer {{login.response.body.$.data.jwt}}
+
+###

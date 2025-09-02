@@ -1,0 +1,47 @@
+﻿@using System.Globalization
+<MudStack>
+    <MudNumericField
+    T="decimal?"
+    HideSpinButtons="true"
+    Margin="Margin.Dense"
+    Typo="Typo.caption"
+    HelperTextOnFocus="true"
+    @bind-Value="@Value"
+    Label="@Label"
+    Adornment="Adornment.End"
+    AdornmentText="@AdornmentText"
+    Variant="Variant.Outlined"
+    Step="0.00000001m"
+    Culture="CultureInfo.InvariantCulture"
+    Class="tracker-numeric-field"
+    />
+</MudStack>
+
+@code {
+    private decimal? _value;
+
+    [Parameter]
+    public string? Label { get; set; }
+    [Parameter]
+    public string? AdornmentText { get; set; }
+    [Parameter]
+    public decimal? Step { get; set; }
+#pragma warning disable BL0007
+    [Parameter]
+    public decimal? Value
+    {
+        get => _value;
+        set 
+        {
+            if (_value == value)
+                return;
+
+            _value = value;
+            ValueChanged.InvokeAsync(value);
+        }
+    }
+#pragma warning restore BL0007
+
+    [Parameter] public EventCallback<decimal?> ValueChanged { get; set; }
+
+}

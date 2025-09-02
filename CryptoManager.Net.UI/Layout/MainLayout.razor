@@ -1,0 +1,222 @@
+﻿@inherits LayoutComponentBase
+@inject NavigationManager NavigationManager
+@inject AuthStateProvider UserState
+@inject ISnackbar Snackbar
+@inject StreamService StreamService
+@inject BalanceService BalanceService
+@inject OrderService OrderService
+@inject LoginService LoginService
+@inject IDialogService DialogService
+@using CryptoExchange.Net.SharedApis
+@using CryptoManager.Net.UI.Dialogs
+@using CryptoManager.Net.UI.Services.Rest
+@using CryptoManager.Net.UI.Services.Stream
+@using Microsoft.AspNetCore.WebUtilities
+@using CryptoManager.Net.UI.Authorization
+@using CryptoManager.Net.UI.Services;
+@implements IDisposable
+
+<MudThemeProvider Theme="@AppTheme" IsDarkMode="true" />
+<MudPopoverProvider />
+<MudDialogProvider />
+<MudSnackbarProvider />
+
+<MudBreakpointProvider @ref="_breakpointProvider">
+    <MudLayout Style="overflow-x: hidden;">
+        <MudAppBar Dense="true">
+            <MudIconButton Icon="@Icons.Material.Filled.Menu" Color="Color.Inherit" Edge="Edge.Start" OnClick="@((e) => DrawerToggle())" />
+            <MudElement Class="d-none d-sm-flex">CryptoManager.Net</MudElement>
+            <MudSpacer />
+            @if (UserState.User == null)
+            {
+                <MudText @onclick="@(x => NavigationManager.NavigateTo("Login"))" Style="cursor: pointer; margin-right: 20px">login</MudText>
+                <MudText @onclick="@(x => NavigationManager.NavigateTo("Register"))" Style="cursor: pointer">register</MudText>
+            }
+            else
+            {
+                <MudMenu 
+                AnchorOrigin="Origin.BottomLeft"
+                FullWidth="true"
+                AriaLabel="Open user menu">
+                    <ActivatorContent>
+                        <MudStack Row="true">
+                            <MudText Style="line-height: 40px;">@UserState.User.Email</MudText>
+                            <MudIconButton Variant="Variant.Filled" Icon="@Icons.Material.Filled.AccountCircle" />
+                        </MudStack>
+                    </ActivatorContent>
+                    <ChildContent>
+                        <MudMenuItem OnClick="@(x => NavigationManager.NavigateTo("Balances"))">Balances</MudMenuItem>
+                        <MudMenuItem OnClick="@(x => NavigationManager.NavigateTo("Orders/Open"))">Open Orders</MudMenuItem>
+                        <MudMenuItem OnClick="@(x => NavigationManager.NavigateTo("Orders/Closed"))">Closed Orders</MudMenuItem>
+                        <MudMenuItem OnClick="@(x => NavigationManager.NavigateTo("Config"))">Configuration</MudMenuItem>
+                        <MudMenuItem OnClick="@(x => NavigationManager.NavigateTo("Logout"))">Logout</MudMenuItem>
+                    </ChildContent>
+                </MudMenu>
+            }
+        </MudAppBar>
+        <MudDrawer @bind-Open="@_drawerOpen"
+            Variant="DrawerVariant.Responsive" 
+            Breakpoint="Breakpoint.Sm" 
+            ClipMode="@DrawerClipMode.Docked"
+                   Style="@("padding-top: 30px;transition:margin-top 0.2s;" + (_breakpointProvider!.Breakpoint != Breakpoint.Xs ? "margin-top:30px;" : "margin-top: 50px;"))">
+            <NavMenu />
+        </MudDrawer>
+        <MudContainer Gutters="false" MaxWidth="MaxWidth.ExtraExtraLarge" Style="@("background: #161a1c; transition:margin-left 0.3s;margin-top: 48px; position: fixed; z-index: 10")" >
+            <SymbolScollerComponent  />
+        </MudContainer>
+        <MudContainer
+            MaxWidth="@(FullWidth() ? MaxWidth.ExtraExtraLarge : MaxWidth.Large)"
+                      Style="@("transition:margin-left 0.3s;margin-top: 100px; margin-bottom: 60px;" + (_breakpointProvider.Breakpoint != Breakpoint.Xs ? (_drawerOpen ? "margin-left: 240px; width: calc(100% - 240px);" : "margin-left: 0px;") : ""))">
+            @Body
+        </MudContainer>
+        <MudContainer Gutters="false" MaxWidth="MaxWidth.ExtraExtraLarge" class="footer">
+            <MudStack Row="true" Justify="Justify.FlexEnd" Spacing="0" Class="footer-container">
+                <div class="footer-item">Created by Jan Korf</div>
+                <div class="footer-item"><a href="/about">About</a></div>
+            </MudStack>
+        </MudContainer>
+    </MudLayout>
+</MudBreakpointProvider>
+
+@code {
+    private MudBreakpointProvider? _breakpointProvider;
+    private CancellationTokenSource _cts = new CancellationTokenSource();
+    private bool _drawerOpen = true;
+
+    MudTheme AppTheme = new MudTheme()
+        {
+            PaletteDark = new PaletteDark()
+            {
+                Primary = Colors.BlueGray.Darken2,
+                Secondary = Colors.Orange.Darken4,
+                Background = "#111",
+                AppbarBackground = "#161a1c",
+                DrawerBackground = "#161a1c",
+                TextPrimary = Colors.Gray.Lighten2,
+                Surface = "#161a1c"
+            },
+        };
+
+
+    protected override async Task OnInitializedAsync()
+    {
+        UserState.AuthenticationStateChanged += OnAuthStateChange;
+
+        await LoginService.RefreshUserAsync();
+
+        StreamService.OnStatusChanged += OnStreamStatusChange;
+        StreamService.OnOrderChanged += OnOrderUpdate;
+        StreamService.OnUserTradeChanged += OnUserTradeUpdate;
+        StreamService.OnAuthSubChanged += OnAuthSubChanged;
+        StreamService.Start();
+
+        _ = BalanceService.UpdateBalancesAsync(() => Task.CompletedTask, null);
+    }
+
+    private Task OnAuthSubChanged(string exchange, string info, SubscriptionStatus status)
+    {
+        if (status == SubscriptionStatus.Restored)
+            Snackbar.Add($"Websocket auth subscription  restored: {exchange} {info}");
+        else
+            Snackbar.Add($"Websocket auth subscription interrupted: {exchange} {info}", Severity.Warning);
+
+        return Task.CompletedTask;
+    }
+
+    private Task OnOrderUpdate(ApiOrder[] orders)
+    {
+        foreach (var item in orders)
+        {
+            var symbolData = item.SymbolId.Split("-");
+            var symbolName = symbolData[1] + "/" + symbolData[2];
+            if (item.Status == SharedOrderStatus.Open && (item.QuantityFilledBase > 0 || item.QuantityFilledQuote > 0))
+            {
+                string filledString = "partially filled";
+                if (item.QuantityFilledBase != null && item.OrderQuantityBase != null)
+                    filledString= $"filled for {item.QuantityFilledBase} out of {item.OrderQuantityBase}";
+                else if (item.QuantityFilledQuote != null && item.OrderQuantityQuote != null)
+                    filledString = $"filled for {item.QuantityFilledQuote} out of {item.OrderQuantityQuote}";
+
+                if (item.AveragePrice != null)
+                    filledString += $" at an average price of {item.AveragePrice}";
+
+                Snackbar.Add($"Order update: {item.Exchange}.{symbolName} order {filledString}", Severity.Info);
+            }
+            else if(item.Status == SharedOrderStatus.Open)
+            {
+                string orderDesc = "";
+                if (item.OrderQuantityBase != null)
+                    orderDesc += $"for {item.OrderQuantityBase}{symbolData[1]} ";
+                else if (item.OrderQuantityQuote != null)
+                    orderDesc += $"for {item.OrderQuantityQuote}{symbolData[2]} ";
+                if (item.OrderPrice != null)
+                    orderDesc += $"@ {item.OrderPrice} ";
+
+                Snackbar.Add($"Order placed: {item.Exchange}.{symbolName} new {item.OrderSide} {item.OrderType} order {orderDesc}", Severity.Info);
+            }
+            else if (item.Status == SharedOrderStatus.Canceled)
+            {
+                Snackbar.Add($"Order canceled: {item.Exchange}.{symbolName}", Severity.Info);
+            }
+            else if (item.Status == SharedOrderStatus.Filled)
+            {
+                string orderDesc = "";
+                if (item.OrderQuantityBase != null)
+                    orderDesc += $"for {item.OrderQuantityBase}{symbolData[1]} ";
+                else if (item.OrderQuantityQuote != null)
+                    orderDesc += $"for {item.OrderQuantityQuote}{symbolData[2]} ";
+                if (item.OrderPrice != null)
+                    orderDesc += $"@ {item.OrderPrice} ";
+                if (item.AveragePrice != null)
+                    orderDesc += $"filled at an average price of {item.AveragePrice}";
+
+                Snackbar.Add($"Order filled: {item.Exchange}.{symbolName} order {orderDesc}", Severity.Info);
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private Task OnUserTradeUpdate(ApiUserTrade[] trades)
+    {
+        foreach (var item in trades)
+        {
+            var symbolData = item.SymbolId.Split("-");
+            Snackbar.Add($"Trade: {item.Exchange}.{symbolData[1]}/{symbolData[2]} order fill: {item.Quantity} @ {item.Price}", Severity.Info);
+        }
+
+        return Task.CompletedTask;
+    }
+
+
+    private async void OnAuthStateChange(Task<AuthenticationState> x)
+    {
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private void OnStreamStatusChange()
+    {
+        _ = InvokeAsync(StateHasChanged);
+    }
+
+    void DrawerToggle()
+    {
+        _drawerOpen = !_drawerOpen;
+    }
+
+    bool FullWidth()
+    {
+        var path = new Uri(NavigationManager.Uri).AbsolutePath;
+        return path.StartsWith("/Symbol/") || path.StartsWith("/Balances") || path.StartsWith("/Quick") || path == "/";
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        _ = StreamService.DisconnectAsync();
+        UserState.AuthenticationStateChanged -= OnAuthStateChange;
+        StreamService.OnOrderChanged -= OnOrderUpdate;
+        StreamService.OnUserTradeChanged -= OnUserTradeUpdate;
+        StreamService.OnStatusChanged -= OnStreamStatusChange;
+    }
+}

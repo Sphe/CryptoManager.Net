@@ -1,0 +1,66 @@
+﻿@page "/"
+@using CryptoManager.Net.UI.Authorization
+@using CryptoManager.Net.UI.Components.Widgets
+@using CryptoManager.Net.UI.Services.Stream
+
+@inject AuthStateProvider AuthProvider
+@inject StreamService StreamService
+
+<PageTitle>Dashboard | CryptoManager.Net</PageTitle>
+
+<MudGrid>
+    @if (AuthProvider.User != null)
+    {
+        <MudItem xxl="4" xl="4" lg="6" md="6" sm="12" xs="12">
+            <MudStack>
+                <BalanceWidget />
+                <BalanceHistoryWidget />
+                <BalanceAssetsWidget />
+            </MudStack>
+        </MudItem>
+
+        <MudItem xxl="4" xl="4" lg="6" md="6" sm="12" xs="12">
+            <MudStack>
+                <AssetsVolumeWidget />
+                <AssetsUpWidget />
+                <AssetsDownWidget />
+            </MudStack>
+        </MudItem>
+
+        <MudItem xxl="4" xl="4" lg="6" md="6" sm="12" xs="12">
+            <MudStack>
+                <ExchangesWidget />
+            </MudStack>
+        </MudItem>
+    }
+    else
+    {
+        <MudItem xxl="4" xl="4" lg="6" md="6" sm="12" xs="12">
+            <MudStack>
+                <AssetsVolumeWidget />
+                <AssetsUpWidget />
+                <AssetsDownWidget />
+            </MudStack>
+        </MudItem>
+
+        <MudItem xxl="4" xl="4" lg="6" md="6" sm="12" xs="12">
+            <MudStack>
+                <ExchangesWidget />
+            </MudStack>
+        </MudItem>
+
+        <MudItem xxl="4" xl="4" lg="6" md="6" sm="12" xs="12">
+        </MudItem>
+    }   
+
+</MudGrid>
+
+@code{
+
+    protected override void OnInitialized()
+    {
+        AuthProvider.AuthenticationStateChanged += (x) => InvokeAsync(StateHasChanged);
+        StreamService.OnStatusChanged += () => InvokeAsync(StateHasChanged);
+    }
+
+}

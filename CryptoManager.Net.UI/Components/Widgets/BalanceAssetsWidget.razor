@@ -1,0 +1,92 @@
+﻿@using CryptoManager.Net.UI.Models
+@using CryptoManager.Net.UI.Services;
+@using CryptoManager.Net.UI.Services.Rest
+@inject SymbolService SymbolService
+@inject BalanceService BalanceService
+@implements IDisposable
+
+<MudPaper>
+    <MudSimpleTable Dense="true">
+        <thead>
+            <tr>
+                <th>
+                    <MudStack Row="true">
+                        @if (_connectionIssues)
+                        {
+                            <MudElement Style="">
+                                <MudTooltip Text="Connection interrupted">
+                                    <MudIcon Icon="@Icons.Material.Filled.Warning" Size="Size.Small"></MudIcon>
+                                </MudTooltip>
+                            </MudElement>
+                        }
+                        <MudText Style="font-size: 16px;color:  #666">portfolio</MudText>
+                    </MudStack>
+                </th>
+                <th>price</th>
+                <th style="text-align:right;">value</th>
+            </tr>
+        </thead>
+        <tbody>
+            @if (!_assets.Any())
+            {
+                <tr>
+                    <td colspan="3">
+                        <MudText Style="padding: 20px; text-align: center;" >User has no assets</MudText>
+                    </td>
+                </tr>
+            }
+            else
+            {
+                @foreach (var row in _assets)
+                {
+                    <tr>
+                        <td><a href="@("/Assets/" + row.Name)">@row.Name</a></td>
+                        <td>$@Formatters.FormatPrice(row.Price)</td>
+                        <td style="text-align: right;">@row.Value.ToString("C")</td>
+                    </tr>
+                }
+            }
+        </tbody>
+    </MudSimpleTable>
+
+    @if (_loading)
+    {
+        <LoaderComponent />
+    }
+</MudPaper>
+
+@code {
+    private IEnumerable<BalanceAsset> _assets = Array.Empty<BalanceAsset>();
+    private Timer? _timer;
+    private bool _connectionIssues;
+    private bool _loading;
+
+    protected override void OnInitialized()
+    {
+        _timer = new Timer(async (x) => await UpdateBalanceAsync(), null, TimeSpan.Zero, TimeSpan.FromSeconds(60));
+    }
+
+    private async Task UpdateBalanceAsync()
+    {
+        _loading = true;
+        await BalanceService.GetAssetsAsync(
+            async data => {
+                _assets = data;
+                _connectionIssues = false;
+                await InvokeAsync(StateHasChanged);
+            },
+            async x => {
+                _connectionIssues = true;
+                await InvokeAsync(StateHasChanged);
+            });
+        Console.WriteLine("Loading done");
+        _loading = false;
+        StateHasChanged();
+    }
+
+    public void Dispose()
+    {
+        _timer?.Dispose();
+    }
+
+}

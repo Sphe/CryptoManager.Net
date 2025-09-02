@@ -1,0 +1,15 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CryptoManager.Net.Database\CryptoManager.Net.Database.csproj" />
+    <ProjectReference Include="..\CryptoManager.Net.Models\CryptoManager.Net.Models.csproj" />
+    <ProjectReference Include="..\CryptoManager.Net.Publish\CryptoManager.Net.Data.csproj" />
+  </ItemGroup>
+
+</Project>

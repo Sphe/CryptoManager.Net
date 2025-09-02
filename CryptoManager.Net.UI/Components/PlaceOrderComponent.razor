@@ -1,0 +1,444 @@
+﻿@using CryptoExchange.Net.Objects
+@using CryptoExchange.Net.SharedApis
+@using CryptoManager.Net.UI.Authorization
+@using CryptoManager.Net.UI.Dialogs
+@using CryptoManager.Net.UI.Models
+@using CryptoManager.Net.UI.Models.ApiModels.Requests
+@using CryptoManager.Net.UI.Services
+@using CryptoManager.Net.UI.Services.Rest
+@using CryptoManager.Net.UI.Services.Stream
+@inject IDialogService DialogService
+@inject OrderService OrderService
+@inject StreamService StreamService
+@inject AuthStateProvider AuthProvider
+@inject ISnackbar Snackbar
+@implements IDisposable
+
+<MudPaper Style="padding: 10px;">
+    <MudToggleGroup T="SharedOrderSide" Value="_orderSide" Color="@(_orderSide == SharedOrderSide.Buy ? Color.Success : Color.Error)" ValueChanged="OrderSideChanged">
+        <MudToggleItem Value="@SharedOrderSide.Sell" />
+        <MudToggleItem Value="@SharedOrderSide.Buy" />
+    </MudToggleGroup>
+
+    <MudStack Justify="Justify.SpaceBetween" Row="true" Style="padding: 10px;">
+        <MudStack Row="true" Justify="Justify.FlexStart">
+            <MudSelect OuterClass="no-flex" T="SharedOrderType" Value="_orderType" ValueChanged="OrderTypeChanged" Dense="true" FullWidth="false" Typo="Typo.caption" Style="max-width: 120px;min-width: 70px;text-align: right;">
+                <MudSelectItem T="SharedOrderType" Value="@SharedOrderType.Limit">@SharedOrderType.Limit</MudSelectItem>
+                <MudSelectItem T="SharedOrderType" Value="@SharedOrderType.Market">@SharedOrderType.Market</MudSelectItem>
+            </MudSelect>
+        </MudStack>
+
+        <MudStack Spacing="0" Style="padding: 6px 0;">
+            @if (GetDisplayBalanceAsset() == SymbolDetails?.QuoteAsset)
+            {
+                <MudLink OnClick="@(x => UseMaxBalance())" Class="text-small">@((_updatedQuoteBalance ?? QuoteAssetBalance).Normalize()) @SymbolDetails?.QuoteAsset</MudLink>
+            }
+            else
+            {
+                <MudLink OnClick="@(x=> UseMaxBalance())" Class="text-small">@((_updatedBaseBalance ?? BaseAssetBalance).Normalize()) @SymbolDetails?.BaseAsset</MudLink>
+            }
+        </MudStack>
+    </MudStack>
+
+    <MudStack Row="true" Spacing="3" StretchItems="StretchItems.All" Style="">
+        @if (_orderType == SharedOrderType.Limit)
+        {
+            <TrackerNumericInputField
+                Label="price" 
+                Step="@SymbolDetails?.PriceStep"
+                AdornmentText="@SymbolDetails?.QuoteAsset" 
+                @bind-Value="@Price" />
+        }
+
+        @if (SymbolDetails?.SupportedQuantities?.GetSupportedQuantityType(_orderSide, _orderType) == SharedQuantityType.BaseAndQuoteAsset)
+        {
+            <MudElement HtmlTag="div" Style="position:relative">                
+                <TrackerNumericInputField 
+                                          Step="@(_quantityAsset == SymbolDetails.BaseAsset ? SymbolDetails.QuantityStep : null)"
+                                          Label="@(_quantityAsset == SymbolDetails.BaseAsset ? "quantity" : "value")"
+                                          @bind-Value="@QuantityOrValue" />
+
+                <MudSelect OuterClass="absolute-select" T="string" @bind-Value="@_quantityAsset" Dense="true" FullWidth="false" Typo="Typo.caption" Style="position: absolute; right:10px; top:10px;min-width: 70px;text-align: right;">
+                    <MudSelectItem T="string" Value="@SymbolDetails.BaseAsset">@SymbolDetails.BaseAsset</MudSelectItem>
+                    <MudSelectItem T="string" Value="@SymbolDetails.QuoteAsset">@SymbolDetails.QuoteAsset</MudSelectItem>
+                </MudSelect>
+            </MudElement>
+        }
+        else
+        {
+            @if (Supports(SharedQuantityType.BaseAsset))
+            {
+                <TrackerNumericInputField 
+                    Label="quantity"
+                    AdornmentText="@SymbolDetails?.BaseAsset"
+                    Step="@SymbolDetails?.QuantityStep"
+                    @bind-Value="@QuantityOrValue"/>
+            }
+
+            @if (Supports(SharedQuantityType.QuoteAsset))
+            {
+                <TrackerNumericInputField
+                    Label="value"
+                    AdornmentText="@SymbolDetails?.QuoteAsset"
+                    @bind-Value="@QuantityOrValue"/>
+            }
+        }
+    </MudStack>
+
+    <MudElement HtmlTag="div" Style="margin-top: 6px;">
+        @foreach(var error in _errors){
+            <MudText Class="order-input-error">@error</MudText>
+        }
+    </MudElement>
+
+    <MudStack Row="true" Justify="Justify.SpaceBetween">
+        @if (_orderType == SharedOrderType.Limit)
+        {
+            if (SymbolDetails?.SupportedOrderTypes?.Contains(SharedOrderType.LimitMaker) == true)
+            {
+                <MudCheckBox T="bool" Size="Size.Small" Label="Post Only" Value="_postOnly" ValueChanged="PostOnlyChanged" />
+            }
+
+            if (SymbolDetails?.SupportedTimeInForces?.Length > 0)
+            {
+                <MudSelect Disabled="@_postOnly" Label="Time in force" OuterClass="no-flex" T="SharedTimeInForce" Value="_timeInForce" ValueChanged="TimeInForceChanged" Dense="true" FullWidth="false" Typo="Typo.caption">
+                    @foreach (var item in SymbolDetails.SupportedTimeInForces)
+                    {
+                        <MudSelectItem T="SharedTimeInForce" Value="@item">@item</MudSelectItem>
+                    }
+                </MudSelect>
+            }
+        }
+    </MudStack>
+
+    <MudButton 
+    Style="margin-top: 10px;"
+    Variant="Variant.Filled"
+    Disabled="!GetOrderButtonEnabled()" 
+    Color="@(_orderSide == SharedOrderSide.Buy ? Color.Success : Color.Error)" 
+    FullWidth="true"
+    OnClick="PlaceOrderAsync">
+        @GetOrderButtonText()
+    </MudButton>
+
+</MudPaper>
+
+@code {
+    private decimal? _updatedBaseBalance;
+    private decimal? _updatedQuoteBalance;
+    private bool _loading;
+
+    [Parameter]
+    public ApiSymbolDetails? SymbolDetails { get; set; }
+    [Parameter]
+    public decimal BaseAssetBalance { get; set; }
+    [Parameter]
+    public decimal QuoteAssetBalance { get; set; }
+    [Parameter]
+    public Action? OnOrderPlacement { get; set; }
+
+    private SharedOrderSide _orderSide = SharedOrderSide.Buy;
+    private SharedOrderType _orderType = SharedOrderType.Limit;
+    private SharedTimeInForce _timeInForce = SharedTimeInForce.GoodTillCanceled;
+    private bool _postOnly;
+    private string? _quantityAsset;
+    private List<string> _errors = new();
+
+    private decimal? _price;
+    public decimal? Price
+    {
+        get => _price;
+        set
+        {
+            _price = value;
+            Console.WriteLine("Setting price to " + value);
+            CheckForErrors();
+        }
+    }
+    private decimal? _quantityOrValue;
+    public decimal? QuantityOrValue
+    {
+        get => _quantityOrValue;
+        set
+        {
+            _quantityOrValue = value;
+            CheckForErrors();
+        }
+    }
+
+    protected override void OnInitialized()
+    {
+        StreamService.OnBalanceChanged += HandleBalanceChange;
+    }
+
+    protected override void OnParametersSet()
+    {
+        base.OnParametersSet();
+        if (SymbolDetails != null && _quantityAsset == null)
+            UpdateQuantityAsset();
+    }
+
+    public void Dispose()
+    {
+        StreamService.OnBalanceChanged -= HandleBalanceChange;
+    }
+
+    private void UseMaxBalance()
+    {
+        if (SymbolDetails == null)
+            return;
+
+        if (_quantityAsset == SymbolDetails.BaseAsset && _orderSide == SharedOrderSide.Buy)
+            return;
+
+        if (_quantityAsset == SymbolDetails.QuoteAsset && _orderSide == SharedOrderSide.Sell)
+            return;
+
+        if (_quantityAsset == SymbolDetails.QuoteAsset)
+            QuantityOrValue = (_updatedQuoteBalance ?? QuoteAssetBalance).Normalize();
+        else  if (_quantityAsset == SymbolDetails.BaseAsset)
+        {
+            var balance = (_updatedBaseBalance ?? BaseAssetBalance);
+            balance = ExchangeHelpers.ApplyRules(balance, SymbolDetails.QuantityDecimals, SymbolDetails.QuantityStep);
+            QuantityOrValue = balance.Normalize();
+        }
+    }
+
+    private string? GetDisplayBalanceAsset()
+    {
+        if (SymbolDetails == null)
+            return null;
+
+        if (_quantityAsset == SymbolDetails.QuoteAsset)
+            return SymbolDetails.QuoteAsset;
+
+        if (_orderSide == SharedOrderSide.Buy)
+            return SymbolDetails.QuoteAsset;
+
+        return SymbolDetails.BaseAsset;
+    }
+
+    private async Task HandleBalanceChange(ApiBalance[] data)
+    {
+        if (SymbolDetails == null)
+            return;
+
+        var baseAssetBalance = data.SingleOrDefault(x => x.Exchange == SymbolDetails.Exchange && x.Asset.Equals(SymbolDetails.BaseAsset, StringComparison.InvariantCultureIgnoreCase));
+        var quoteAssetBalance = data.SingleOrDefault(x => x.Exchange == SymbolDetails.Exchange && x.Asset.Equals(SymbolDetails.QuoteAsset, StringComparison.InvariantCultureIgnoreCase));
+        if (baseAssetBalance?.Available != null)
+            _updatedBaseBalance = baseAssetBalance.Available.Value;
+        if (quoteAssetBalance?.Available != null)
+            _updatedQuoteBalance = quoteAssetBalance.Available.Value;
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private void CheckForErrors()
+    {
+        _errors.Clear();
+        if (SymbolDetails == null)
+            return;
+
+        if (_orderType == SharedOrderType.Limit)
+        {
+            if (_quantityAsset == SymbolDetails.BaseAsset)
+            {
+                // Limit order in base quantity
+
+                // Quantity checks
+                if (QuantityOrValue.HasValue)
+                {
+                    if (SymbolDetails.QuantityStep.HasValue && QuantityOrValue.Value % SymbolDetails.QuantityStep.Value != 0)
+                        _errors.Add($"Quantity step: {SymbolDetails.QuantityStep.Value.Normalize()}");
+
+                    if (SymbolDetails.QuantityDecimals.HasValue && HasMoreThanNDecimals(QuantityOrValue.Value, SymbolDetails.QuantityDecimals.Value))
+                        _errors.Add($"Quantity max decimal places: {SymbolDetails.QuantityDecimals}");
+
+                    if (SymbolDetails.MinTradeQuantity.HasValue && QuantityOrValue < SymbolDetails.MinTradeQuantity)
+                        _errors.Add($"Min order quantity: {SymbolDetails.MinTradeQuantity.Value.Normalize()} {SymbolDetails.BaseAsset}");
+
+                    if (SymbolDetails.MinNotionalValue.HasValue && _price * _quantityOrValue < SymbolDetails.MinNotionalValue)
+                        _errors.Add($"Min order value: {SymbolDetails.MinNotionalValue.Value.Normalize()} {SymbolDetails.QuoteAsset}");
+                }
+
+                if (Price.HasValue)
+                {
+                    if (SymbolDetails.PriceSignificantFigures.HasValue && ExchangeHelpers.RoundToSignificantDigits(Price.Value, SymbolDetails.PriceSignificantFigures.Value, RoundingType.Closest) != Price)
+                        _errors.Add($"Price max significant figures: {SymbolDetails.PriceSignificantFigures.Value}");
+
+                    if (SymbolDetails.PriceStep.HasValue && Price.Value % SymbolDetails.PriceStep.Value != 0)
+                        _errors.Add($"Price step: {SymbolDetails.PriceStep.Value.Normalize()}");
+
+                    if (SymbolDetails.PriceDecimals.HasValue && HasMoreThanNDecimals(Price.Value, SymbolDetails.PriceDecimals.Value))
+                        _errors.Add($"Price max decimal places: {SymbolDetails.PriceDecimals}");
+                }
+            }
+            else
+            {
+                // Limit order in quote quantity
+
+                if (QuantityOrValue.HasValue)
+                {
+                    if (SymbolDetails.MinNotionalValue.HasValue && QuantityOrValue < SymbolDetails.MinNotionalValue)
+                        _errors.Add($"Min order value: {SymbolDetails.MinNotionalValue.Value.Normalize()} {SymbolDetails.QuoteAsset}");
+                }
+
+                if (Price.HasValue)
+                {
+                    if (SymbolDetails.PriceSignificantFigures.HasValue && ExchangeHelpers.RoundToSignificantDigits(Price.Value, SymbolDetails.PriceSignificantFigures.Value, RoundingType.Closest) != Price)
+                        _errors.Add($"Price max significant figures: {SymbolDetails.PriceSignificantFigures.Value}");
+
+                    if (SymbolDetails.PriceStep.HasValue && Price.Value % SymbolDetails.PriceStep.Value != 0)
+                        _errors.Add($"Price step: {SymbolDetails.PriceStep.Value.Normalize()}");
+
+                    if (SymbolDetails.PriceDecimals.HasValue && HasMoreThanNDecimals(Price.Value, SymbolDetails.PriceDecimals.Value))
+                        _errors.Add($"Price max decimal places: {SymbolDetails.PriceDecimals}");
+                }
+            }
+        }
+        else
+        {
+            if (_quantityAsset == SymbolDetails.BaseAsset)
+            {
+                // Market order in base quantity
+
+                if (QuantityOrValue.HasValue)
+                {
+                    if (SymbolDetails.QuantityStep.HasValue && QuantityOrValue.Value % SymbolDetails.QuantityStep.Value != 0)
+                        _errors.Add($"Quantity step: {SymbolDetails.QuantityStep.Value.Normalize()}");
+
+                    if (SymbolDetails.QuantityDecimals.HasValue && HasMoreThanNDecimals(QuantityOrValue.Value, SymbolDetails.QuantityDecimals.Value))
+                        _errors.Add($"Quantity max decimal places: {SymbolDetails.QuantityDecimals}");
+
+                    if (SymbolDetails.MinTradeQuantity.HasValue && QuantityOrValue < SymbolDetails.MinTradeQuantity)
+                        _errors.Add($"Min order quantity: {SymbolDetails.MinTradeQuantity.Value.Normalize()} {SymbolDetails.BaseAsset}");
+                }
+            }
+            else
+            {
+                // Market order in quote quantity
+
+                if (SymbolDetails.MinNotionalValue.HasValue && QuantityOrValue < SymbolDetails.MinNotionalValue)
+                    _errors.Add($"Min order value: {SymbolDetails.MinNotionalValue.Value.Normalize()} {SymbolDetails.QuoteAsset}");
+            }
+        }
+    }
+
+    bool HasMoreThanNDecimals(decimal d, int n)
+    {
+        return !(d * (decimal)Math.Pow(10, n) % 1 == 0);
+    }
+
+
+    private void UpdateQuantityAsset()
+    {
+        QuantityOrValue = null;
+        if (SymbolDetails!.SupportedQuantities?.IsSupported(_orderSide, _orderType, SharedQuantityType.BaseAsset) == true)
+            _quantityAsset = SymbolDetails.BaseAsset;
+        else
+            _quantityAsset = SymbolDetails.QuoteAsset;
+    }
+
+    public void OrderSideChanged(SharedOrderSide value)
+    {
+        _orderSide = value;
+        UpdateQuantityAsset();
+    }
+
+    public void TimeInForceChanged(SharedTimeInForce value)
+    {
+        _timeInForce = value;
+    }
+
+    public void PostOnlyChanged(bool value)
+    {
+        _timeInForce = SharedTimeInForce.GoodTillCanceled;
+        _postOnly = value;
+    }
+
+    public void OrderTypeChanged(SharedOrderType value)
+    {
+        Price = null;
+        _orderType = value;
+
+        if (value == SharedOrderType.Market)
+        {
+            _timeInForce = SharedTimeInForce.ImmediateOrCancel;
+            _postOnly = false;
+        }
+        else
+        {
+            _timeInForce = SymbolDetails?.SupportedTimeInForces?.FirstOrDefault() ?? SharedTimeInForce.GoodTillCanceled;
+        }
+
+        UpdateQuantityAsset();
+    }
+
+    private bool Supports(SharedQuantityType type)
+    {
+        if (SymbolDetails == null)
+            return false;
+
+        return SymbolDetails.SupportedQuantities?.IsSupported(_orderSide, _orderType, type) == true;
+    }
+
+    private string GetOrderButtonText()
+    {
+        if (AuthProvider.User == null)
+            return "not logged in";
+
+        if (AuthProvider.User?.ExchangeAuthenticated(SymbolDetails?.Exchange) != true)
+            return "unauthorized";
+
+        if (_loading)
+            return "processing..";
+
+        return _orderSide.ToString();
+    }
+
+    private bool GetOrderButtonEnabled()
+    {
+        if (AuthProvider.User?.ExchangeAuthenticated(SymbolDetails?.Exchange) != true)
+            return false;
+
+        return !_loading;
+    }
+
+    private async Task PlaceOrderAsync()
+    {
+        if (SymbolDetails == null || _quantityAsset == null)
+            return;
+
+        _loading = true;
+        var loadingDialog = await DialogService.ShowAsync<LoadingDialog>(null, options: new DialogOptions
+        {
+            BackdropClick = false,
+            CloseOnEscapeKey = false
+        });
+
+        var orderType = _orderType;
+        if (orderType == SharedOrderType.Limit && _postOnly)
+            orderType = SharedOrderType.LimitMaker;
+
+        await OrderService.PlaceOrderAsync(
+            data =>
+            {
+                return Task.CompletedTask;
+            },
+            null,
+            new PlaceOrderRequest
+            {
+                LimitPrice = Price,
+                BaseQuantity = _quantityAsset == SymbolDetails.BaseAsset ? QuantityOrValue : null,
+                QuoteQuantity = _quantityAsset == SymbolDetails.QuoteAsset ? QuantityOrValue : null,
+                OrderSide = _orderSide,
+                OrderType = orderType,
+                SymbolId = SymbolDetails.Id,
+                TimeInForce = _timeInForce
+            });
+
+        _loading = false;
+        loadingDialog.Close();
+        OnOrderPlacement?.Invoke();
+    }
+}

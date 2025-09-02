@@ -1,0 +1,89 @@
+
+# @name login
+POST {{HostAddress}}/users/login
+Accept: application/json
+Content-Type: application/json
+
+{
+    "email": "user1@test.com",
+    "password": "password"
+}
+
+###
+
+GET {{HostAddress}}/balances?page=1&pageSize=3
+Accept: application/json
+Authorization: Bearer {{login.response.body.$.data.jwt}}
+
+###
+
+@exchange=Bitfinex
+@query=E
+@orderBy=UsdValue
+@direction=Ascending
+@page=1
+@pageSize=10
+
+GET {{HostAddress}}/balances/exchange?exchange={{exchange}}&query={{query}}&orderBy={{orderBy}}&orderDirection={{direction}}&page={{page}}&pageSize={{pageSize}}
+Accept: application/json
+Authorization: Bearer {{login.response.body.$.data.jwt}}
+
+###
+
+GET {{HostAddress}}/balances/valuation
+Accept: application/json
+Authorization: Bearer {{login.response.body.$.data.jwt}}
+
+###
+
+@query=E
+@orderBy=UsdValue
+@direction=Ascending
+@page=1
+@pageSize=10
+
+GET {{HostAddress}}/balances/external?query={{query}}&orderBy={{orderBy}}&orderDirection={{direction}}&page={{page}}&pageSize={{pageSize}}
+Accept: application/json
+Authorization: Bearer {{login.response.body.$.data.jwt}}
+
+###
+
+@asset=ETH
+@total=2
+
+POST {{HostAddress}}/balances/external
+Content-Type: application/json
+Accept: application/json
+Authorization: Bearer {{login.response.body.$.data.jwt}}
+
+{
+  "asset": "{{asset}}",
+  "total": {{total}}
+}
+
+###
+
+@asset=ETH
+
+DELETE {{HostAddress}}/balances/external/{{asset}}
+Accept: application/json
+Authorization: Bearer {{login.response.body.$.data.jwt}}
+
+###
+
+POST {{HostAddress}}/balances/update
+Accept: application/json
+Authorization: Bearer {{login.response.body.$.data.jwt}}
+
+###
+
+GET {{HostAddress}}/balances/history
+Accept: application/json
+Authorization: Bearer {{login.response.body.$.data.jwt}}
+
+
+###
+
+GET {{HostAddress}}/balances/assets
+Accept: application/json
+Authorization: Bearer {{login.response.body.$.data.jwt}}

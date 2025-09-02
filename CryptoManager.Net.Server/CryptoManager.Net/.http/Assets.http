@@ -1,0 +1,23 @@
+# @name assets
+
+@orderBy=VolumeUsd
+@orderDirection=Descending
+@assetType=Crypto
+@page=1
+@pageSize=10
+
+GET {{HostAddress}}/assets?orderBy=VolumeUsd&orderDirection={{orderDirection}}&assetType={{assetType}}&page={{page}}&pageSize={{pageSize}}
+Accept: application/json
+
+###
+
+@query=ETH
+@orderBy=ChangePercentage
+@orderDirection=Descending
+@page=1
+@pageSize=10
+
+GET {{HostAddress}}/assets?query={{query}}&orderBy={{orderBy}}&orderDirection={{orderDirection}}&page={{page}}&pageSize={{pageSize}}
+Accept: application/json
+
+###

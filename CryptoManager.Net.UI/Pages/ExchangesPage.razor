@@ -1,0 +1,97 @@
+﻿@page "/exchanges"
+@inject ExchangeService ExchangeService
+@inject NavigationManager NavigationManager
+@using CryptoManager.Net.UI.Models
+@using CryptoManager.Net.UI.Services
+
+<PageTitle>Exchanges | CryptoManager.Net</PageTitle>
+
+<MudGrid Class="breadcrumbs" Spacing="0">
+    <MudItem xs="12">
+        <MudBreadcrumbs Items="breadcrumbs"></MudBreadcrumbs>
+    </MudItem>
+</MudGrid>
+
+<MudTable T="ApiExchange" ServerData="ServerReload" @ref="table" OnRowClick="RowClickEvent">
+    <ToolBarContent>
+        <MudTextField Style="max-width: 400px;" T="string" ValueChanged="@(s=>OnSearch(s))" Placeholder="Search" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" IconSize="Size.Medium" Class="mt-0"></MudTextField>
+    </ToolBarContent>
+    <HeaderContent>
+        <MudTh>Name</MudTh>
+        <MudTh Style="text-align:center"><MudTableSortLabel SortLabel="@nameof(ApiExchange.Symbols)" T="ApiExchange">Symbols</MudTableSortLabel></MudTh>
+        <MudTh Style="text-align:right"><MudTableSortLabel SortLabel="@nameof(ApiExchange.UsdVolume)" T="ApiExchange" InitialDirection="SortDirection.Descending">Volume</MudTableSortLabel></MudTh>
+    </HeaderContent>
+    <RowTemplate>
+        <MudTd Style="cursor: pointer" DataLabel="Name">@context.Exchange</MudTd>
+        <MudTd DataLabel="Symbols" Style="text-align:center;cursor: pointer">@(context.Symbols)</MudTd>
+        <MudTd DataLabel="Volume" Style="text-align:right;cursor: pointer">@((context.UsdVolume).ToString("C"))</MudTd>
+    </RowTemplate>
+    <NoRecordsContent>
+        @if (_connectionIssues)
+        {
+            <MudText>Failed to retrieve exchanges</MudText>
+        }
+        else
+        {
+            <MudText>No exchanges found</MudText>
+        }
+    </NoRecordsContent>
+    <LoadingContent>
+        <LoaderComponent />
+    </LoadingContent>
+    <PagerContent>
+        <MudTablePager HideRowsPerPage="true" />
+    </PagerContent>
+</MudTable>
+
+
+@code {
+    private MudTable<ApiExchange>? table;
+    private string? searchString = null;
+    private bool _connectionIssues;
+
+    private List<BreadcrumbItem> breadcrumbs = new List<BreadcrumbItem>
+    {
+        new BreadcrumbItem("Exchanges", href: "/Exchanges"),
+    };
+
+    private async Task<TableData<ApiExchange>> ServerReload(TableState state, CancellationToken token)
+    {
+        Page<ApiExchange>? exchanges = null;
+        await ExchangeService.GetExchangesAsync(
+            data =>
+            {
+                exchanges = data;
+                _connectionIssues = false;
+                return Task.CompletedTask;
+            },
+            error => {
+                _connectionIssues = true;
+                return Task.CompletedTask;
+            },
+            query: searchString,
+            sort: state.SortLabel,
+            sortDirection: state.SortDirection.ToString(),
+            page: state.Page + 1,
+            pageSize: state.PageSize);
+
+        if (exchanges == null)
+            return new TableData<ApiExchange>() { Items = Array.Empty<ApiExchange>(), TotalItems = 0 };
+
+        return new TableData<ApiExchange>() { Items = exchanges.Items, TotalItems = exchanges.TotalResults };
+    }
+
+    private void RowClickEvent(TableRowClickEventArgs<ApiExchange> tableRowClickEventArgs)
+    {
+        if (tableRowClickEventArgs.Item == null)
+            return;
+
+        NavigationManager.NavigateTo($"Exchanges/{tableRowClickEventArgs.Item.Exchange}");
+    }
+
+    private void OnSearch(string text)
+    {
+        searchString = text;
+        table?.ReloadServerData();
+    }
+}

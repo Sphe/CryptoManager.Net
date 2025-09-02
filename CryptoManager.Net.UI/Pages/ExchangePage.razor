@@ -1,0 +1,214 @@
+﻿@page "/exchanges/{ExchangeName}"
+@inject ExchangeService ExchangeService
+@inject SymbolService SymbolService
+@inject BalanceService BalanceService
+@inject NavigationManager NavigationManager
+@inject AuthStateProvider AuthProvider
+@using CryptoManager.Net.UI.Authorization
+@using Microsoft.AspNetCore.WebUtilities
+@using CryptoManager.Net.UI.Models
+@using CryptoManager.Net.UI.Services;
+@using CryptoManager.Net.UI.Services.Rest
+
+<PageTitle>@ExchangeName | CryptoManager.Net</PageTitle>
+
+<MudGrid Class="breadcrumbs" Spacing="0">
+    <MudItem xs="12">
+        <MudBreadcrumbs Items="breadcrumbs"></MudBreadcrumbs>
+    </MudItem>
+</MudGrid>
+
+<MudPaper>
+    <MudToolBar>
+        <MudImage Width="40" Height="40" Src="@exchangeDetails?.LogoUrl"></MudImage>
+        <MudText Style="margin-left: 20px;">@ExchangeName</MudText>
+        <MudSpacer />
+        <MudText>@exchangeDetails?.Url</MudText>
+    </MudToolBar>
+</MudPaper>
+
+<MudGrid Style="margin-top: 0px;">
+    <MudItem xs="12" sm="6" md="7">
+        <SymbolTableComponent ExcludedColumns="[nameof(ApiSymbol.Exchange)]"
+                              FailedToRetrieve="_symbolConnectionIssues"
+                              OnSearch="OnSearchSymbol"
+                              OnSymbolClick="RowClickEvent"
+                              OnTableReload="LoadSymbolsAsync"
+                              @ref="_symbolTable" />
+    </MudItem>
+
+    @if (AuthProvider.User != null)
+    {
+        <MudItem xs="12" sm="6" md="5">
+            <MudGrid>
+                <MudItem xs="12" sm="12" md="6" xl="12">
+                    <ValuationComponent AccountValue="_accountValue" Style="padding: 30px" ShowExternal="false" />
+                </MudItem>
+
+                <MudItem xs="12" sm="12" md="6" xl="12">
+                    <BalancesTableComponent 
+                        Authenticated="true" 
+                        IncludeExchange="false" 
+                        FailedToRetrieve="_balanceConnectionIssues" 
+                        OnBalanceClick="BalanceRowClickEvent"
+                        OnTableReload="LoadBalancesAsync"
+                        Search="true"
+                        OnSearch="OnSearchBalance"
+                        @ref="_balanceTable" />
+                </MudItem>
+            </MudGrid>
+        </MudItem>
+    }
+
+</MudGrid>
+
+
+@code {
+    private SymbolTableComponent? _symbolTable;
+    private BalancesTableComponent? _balanceTable;
+    private string? _searchStringSymbol = null;
+    private string? _searchStringBalance = null;
+    private bool _symbolConnectionIssues;
+    private bool _balanceConnectionIssues;
+    private ApiBalanceValuation? _accountValue = null;
+
+    [Parameter]
+    public string? ExchangeName { get; set; }
+
+    private List<BreadcrumbItem> breadcrumbs = new List<BreadcrumbItem>();
+    private ApiExchangeDetails? exchangeDetails;
+
+    protected override void OnParametersSet()
+    {
+        breadcrumbs = new List<BreadcrumbItem>
+        {
+            new BreadcrumbItem("Exchanges", href: "/Exchanges"),
+            new BreadcrumbItem($"{ExchangeName}", href: $"/Exchanges/{ExchangeName}"),
+        };
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (ExchangeName == null)
+            return;
+
+        var exTask = ExchangeService.GetExchangeDetailsAsync(
+            data =>
+                {
+                    exchangeDetails = data;
+                    return Task.CompletedTask;
+                },
+                null,
+                ExchangeName);
+
+        var balTask = BalanceService.GetValueAsync(
+            data =>
+            {
+                _accountValue = data;
+                return Task.CompletedTask;
+            },
+            error =>
+            {
+                return Task.CompletedTask;
+            }, ExchangeName);
+
+        await Task.WhenAll(exTask, balTask);
+    }
+
+    private async Task<TableData<ApiSymbol>> LoadSymbolsAsync(TableState state)
+    {
+        Page<ApiSymbol>? symbols = null;
+        await SymbolService.GetSymbolsAsync(
+            data =>
+            {
+                symbols = data;
+                _balanceConnectionIssues = true;
+                return Task.CompletedTask;
+            }, 
+            error =>
+            {
+                _symbolConnectionIssues = true;
+                return Task.CompletedTask;
+            },
+            _searchStringSymbol,
+            exchange: ExchangeName,
+            sort: state.SortLabel,
+            sortDirection: state.SortDirection.ToString(),
+            page: state.Page + 1,
+            pageSize: state.PageSize);
+
+        if (symbols == null)
+            return new TableData<ApiSymbol>() { Items = Array.Empty<ApiSymbol>(), TotalItems = 0 };
+
+        return new TableData<ApiSymbol>() { Items = symbols.Items, TotalItems = symbols.TotalResults };
+    }
+
+    private async Task<TableData<ApiBalance>> LoadBalancesAsync(TableState state, bool refresh)
+    {
+        if (refresh)
+        {
+            await BalanceService.UpdateBalancesAsync(() => Task.CompletedTask, x =>
+            {
+                // TODO show error
+                return Task.CompletedTask;
+            }, ExchangeName);
+        }
+
+        Page<ApiBalance>? balances = null; 
+        await BalanceService.GetBalancesAsync(
+            data =>
+            {
+                balances = data;
+                _balanceConnectionIssues = false;
+                return Task.CompletedTask;
+            },
+            error => {
+                _balanceConnectionIssues = true;
+                return Task.CompletedTask;
+            },
+            _searchStringBalance,
+            exchange: ExchangeName,
+            sort: state.SortLabel,
+            sortDirection: state.SortDirection.ToString(),
+            page: state.Page + 1,
+            pageSize: state.PageSize);
+
+        if (balances == null)
+            return new TableData<ApiBalance>() { Items = Array.Empty<ApiBalance>(), TotalItems = 0 };
+
+        return new TableData<ApiBalance>() { Items = balances.Items, TotalItems = balances.TotalResults };
+    }
+
+    private void RowClickEvent(ApiSymbol symbol)
+    {
+        var crumbs = breadcrumbs.Select(x => x.Text + "|" + x.Href);
+        var uri = $"Symbol/{symbol.Id}";
+        foreach (var crumb in crumbs)
+            uri = QueryHelpers.AddQueryString(uri, "from", crumb);
+        NavigationManager.NavigateTo(uri);
+    }
+
+    private void BalanceRowClickEvent(ApiBalance balance)
+    {
+        if (balance.Asset.StartsWith("USD") || balance.Asset.EndsWith("USD"))
+            return; // Stable coins often don't have a base asset pair
+
+        var crumbs = breadcrumbs.Select(x => x.Text + "|" + x.Href);
+        var uri = $"Symbol/{balance!.Exchange}-{balance.Asset}-USDT";
+        foreach (var crumb in crumbs)
+            uri = QueryHelpers.AddQueryString(uri, "from", crumb);
+        NavigationManager.NavigateTo(uri);
+    }
+
+    private void OnSearchBalance(string text)
+    {
+        _searchStringBalance = text;
+        _balanceTable?.Reload();
+    }
+
+    private void OnSearchSymbol(string text)
+    {
+        _searchStringSymbol = text;
+        _symbolTable?.Reload();
+    }
+}

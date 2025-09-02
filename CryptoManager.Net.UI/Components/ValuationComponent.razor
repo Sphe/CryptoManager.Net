@@ -1,0 +1,49 @@
+﻿<MudPaper Elevation="0" Style="@Style">
+    @if (ShowExternal)
+    {
+        <MudStack Row="true" Justify="Justify.SpaceBetween" AlignItems="AlignItems.Center">
+            <MudStack Spacing="0">
+                <MudText Style="color: #444">total</MudText>
+                <MudText Style="font-size: 30px;">@((AccountValue?.Total)?.ToString("C") ?? "-")</MudText>
+            </MudStack>
+            <MudStack Row="false">
+                <MudStack Spacing="0">
+                    <MudText Style="font-size:12px;color: #444" Typo="Typo.subtitle2">on exchange</MudText>
+                    <MudText>@(AccountValue?.Exchange.ToString("C") ?? "-")</MudText>
+                </MudStack>
+
+                <MudStack Spacing="0">
+                    <MudText Style="font-size:12px;color: #444" Typo="Typo.subtitle2">external</MudText>
+                    <MudText>@(AccountValue?.External.ToString("C") ?? "-")</MudText>
+                </MudStack>
+            </MudStack>
+        </MudStack>
+    }
+    else
+    {
+        <MudPaper Style="padding: 30px">
+            <MudStack Spacing="0">
+                <MudText Style="color: #444">value on exchange</MudText>
+                <MudText Style="font-size: 30px;">@((AccountValue?.Exchange)?.ToString("C"))</MudText>
+            </MudStack>
+        </MudPaper>
+    }
+</MudPaper>
+
+
+@code {
+    [Parameter]
+    public ApiBalanceValuation? AccountValue { get; set; }
+
+    [Parameter]
+    public bool ShowExternal { get; set; } = true;
+
+    [Parameter]
+    public string? Style { get; set; }
+
+    [Parameter]
+    public bool Loading { get; set; } // TODO UI
+
+    [Parameter]
+    public bool FailedToLoad { get; set; }// TODO UI
+}

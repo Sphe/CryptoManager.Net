@@ -1,0 +1,97 @@
+﻿@page "/symbols"
+@inject SymbolService SymbolService
+@inject ExchangeService ExchangeService
+@inject NavigationManager NavigationManager
+@using CryptoManager.Net.UI.Models
+@using CryptoManager.Net.UI.Services;
+@using CryptoManager.Net.UI.Services.Rest
+@using Microsoft.AspNetCore.WebUtilities
+
+<PageTitle>Symbols | CryptoManager.Net</PageTitle>
+
+<MudGrid Class="breadcrumbs" Spacing="0">
+    <MudItem xs="12">
+        <MudBreadcrumbs Items="breadcrumbs"></MudBreadcrumbs>
+    </MudItem>
+</MudGrid>
+
+<SymbolTableComponent Exchanges="exchanges"
+                      FailedToRetrieve="_connectionIssues"
+                      OnExchangeChange="OnExchangeChange"
+                      OnSearch="OnSearch"
+                      OnSymbolClick="RowClickEvent"
+                      OnTableReload="LoadAsync"
+                      @ref="_table" />
+
+@code {
+    private SymbolTableComponent? _table;
+    private string? searchString = null;
+    private string? exchange = null;
+    private bool _connectionIssues;
+
+    private List<BreadcrumbItem> breadcrumbs = new List<BreadcrumbItem>
+    {
+        new BreadcrumbItem("Symbols", href: "/Symbols"),
+    };
+
+    private string[] exchanges = Array.Empty<string>();
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ExchangeService.GetExchangeNamesAsync(
+            data =>
+            {
+                exchanges = data.ToArray();
+                return Task.CompletedTask;
+            }, error => Task.CompletedTask);
+    }
+
+    private async Task<TableData<ApiSymbol>> LoadAsync(TableState state)
+    {
+        Page<ApiSymbol>? assets = null;
+        await SymbolService.GetSymbolsAsync(
+            data =>
+            {
+                assets = data;
+                _connectionIssues = false;
+                return Task.CompletedTask;
+            },
+            error =>
+            {
+                _connectionIssues = true;
+                return Task.CompletedTask;
+            },
+            searchString,
+            exchange: exchange,
+            sort: state.SortLabel,
+            sortDirection: state.SortDirection.ToString(),
+            page: state.Page + 1,
+            pageSize: state.PageSize);
+
+        if (assets == null)
+            return new TableData<ApiSymbol>() { Items = Array.Empty<ApiSymbol>(), TotalItems = 0 };
+
+        return new TableData<ApiSymbol>() { Items = assets.Items, TotalItems = assets.TotalResults };
+    }
+
+    private void RowClickEvent(ApiSymbol symbol)
+    {
+        var crumbs = breadcrumbs.Select(x => x.Text + "|" + x.Href);
+        var uri = $"Symbol/{symbol.Id}";
+        foreach (var crumb in crumbs)
+            uri = QueryHelpers.AddQueryString(uri, "from", crumb);
+        NavigationManager.NavigateTo(uri);
+    }
+
+    private void OnSearch(string text)
+    {
+        searchString = text;
+        _table?.Reload();
+    }
+
+    private void OnExchangeChange(string text)
+    {
+        exchange = text == "All" ? null : text;
+        _table?.Reload();
+    }
+}

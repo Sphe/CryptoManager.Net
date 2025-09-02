@@ -1,0 +1,180 @@
+﻿@using CryptoManager.Net.Models.Response
+@using CryptoManager.Net.UI.Services
+@using CryptoManager.Net.UI.Services.Rest
+@using CryptoManager.Net.UI.Services.Stream
+@implements IAsyncDisposable
+@inject IJSRuntime JsRuntime
+@inject SymbolService SymbolService
+@inject BalanceService BalanceService
+@inject ExchangeService ExchangeService
+@inject NavigationManager NavigationManager
+@inject StreamService StreamService
+@inject OrderService OrderService
+
+<MudPaper Class="compact-symbol-wrapper">
+    <MudContainer Style="padding: 10px;">
+        <MudStack Row="true" Justify="Justify.SpaceBetween">
+            <MudText Typo="Typo.body1">@Exchange - @BaseAsset/@QuoteAsset</MudText>
+            <MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.Delete" OnClick="OnRemove" />
+        </MudStack>
+    </MudContainer>
+
+    <MudGrid class="compact-symbol" Spacing="1" Justify="Justify.FlexStart">
+        <MudItem xl="12" lg="12" md="12" sm="12" xs="12">
+            <div id="@("chart-container-" + SymbolId)" style="height:300px" />
+        </MudItem>
+        <MudItem xl="12" lg="12" md="12" sm="12" xs="12">
+            <PlaceOrderComponent SymbolDetails="_symbol"
+                                 BaseAssetBalance="_baseAssetBalance"
+                                 QuoteAssetBalance="_quoteAssetBalance" />
+        </MudItem>
+        <MudItem xl="6" lg="6" md="6" sm="6" xs="6">
+            <MudText Style="padding: 0 15px" Align="Align.Left">Orderbook</MudText>
+            <OrderBookComponent @ref="_bookComponent"
+                                Connected="_bookConnected"
+                                Loading="_bookLoading"
+                                Compact="true"
+                                Limit="3"
+                                OnRetryConnect="ConnectOrderBookAsync"
+                                QuoteAsset="@_symbol?.QuoteAsset" />
+        </MudItem>
+        <MudItem xl="6" lg="6" md="6" sm="6" xs="6">
+            <MudText Style="padding: 0 15px" Align="Align.Right">Trades</MudText>
+            <TradesComponent Connected="_tradesConnected"
+                             Limit="7"
+                             Compact="true"
+                             OnRetryConnect="ConnectTradesAsync"
+                             Loading="_tradesLoading"
+                             @ref="_tradesComponent" />
+        </MudItem>
+    </MudGrid>
+</MudPaper>
+
+@code
+{
+    [Parameter]
+    public string? SymbolId { get; set; }
+
+    [Parameter]
+    public required Func<Task> OnRemove { get; set; }
+
+    private ApiSymbolDetails? _symbol;
+    private string? Exchange => SymbolId?.Split('-')?[0];
+    private string? BaseAsset => SymbolId?.Split('-')?[1];
+    private string? QuoteAsset => SymbolId?.Split('-')?[2];
+
+    private bool _bookLoading = true;
+    private bool _bookConnected;
+
+    private bool _tradesLoading = true;
+    private bool _tradesConnected;
+
+    private decimal _baseAssetBalance;
+    private decimal _quoteAssetBalance;
+
+    private OrderBookComponent? _bookComponent;
+    private TradesComponent? _tradesComponent;
+
+    private string? _subbedSymbol;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (SymbolId == null)
+            return;
+
+        if (SymbolId == _subbedSymbol)
+            return;
+
+        if (_subbedSymbol != null)
+        {
+            await StreamService.UnsubscribeToOrderBookAsync(SymbolId);
+            await StreamService.UnsubscribeTradeUpdatesAsync(SymbolId);
+        }
+
+        await SymbolService.GetSymbolDetailsAsync(
+            data =>
+            {
+                _symbol = data;
+                return Task.CompletedTask;
+            },
+            null,
+            SymbolId);
+
+        var symbolData = SymbolId.Split("-");
+        await JsRuntime.InvokeVoidAsync("window.chart.show", symbolData[0].ToUpperInvariant() + ":" + symbolData[1] + symbolData[2], "chart-container-" + SymbolId, false);
+
+        if (_symbol == null)
+            return;
+
+        var exTask = BalanceService.GetBalancesAsync(
+            data =>
+            {
+                _baseAssetBalance = data.Items.FirstOrDefault()?.Available ?? 0;
+                return Task.CompletedTask;
+            },
+            null, exchange: _symbol.Exchange, asset: _symbol.BaseAsset);
+
+        var balTask = BalanceService.GetBalancesAsync(
+            data =>
+            {
+                _quoteAssetBalance = data.Items.FirstOrDefault()?.Available ?? 0;
+                return Task.CompletedTask;
+            },
+            null, exchange: _symbol.Exchange, asset: _symbol.QuoteAsset);
+
+        await Task.WhenAll(exTask, balTask);
+
+        var subTaskOrderbook = ConnectOrderBookAsync();
+        var subTaskTrades = ConnectTradesAsync();
+
+        await Task.WhenAll(subTaskOrderbook, subTaskTrades);
+        _subbedSymbol = SymbolId;
+    }
+    private async Task ConnectTradesAsync()
+    {
+        if (SymbolId == null)
+            return;
+
+        _tradesLoading = true;
+        var result = await StreamService.SubscribeToTradeUpdatesAsync(SymbolId, data =>
+        {
+            _bookComponent?.UpdateLastPrice(data.Last().Price);
+            _tradesComponent?.Update(data);
+        }, statusUpdate =>
+        {
+            _tradesConnected = statusUpdate.Status == SubscriptionStatus.Restored;
+        });
+
+        _tradesConnected = result.Success;
+        _tradesLoading = false;
+    }
+
+    private async Task ConnectOrderBookAsync()
+    {
+        if (SymbolId == null)
+            return;
+
+        _bookLoading = true;
+        var result = await StreamService.SubscribeToOrderBookUpdatesAsync(SymbolId, data =>
+        {
+            _bookComponent?.Update(data);
+        }, statusUpdate =>
+        {
+            // TODO Apply to UI
+            _bookConnected = statusUpdate.Status == SubscriptionStatus.Restored;
+        });
+
+        _bookConnected = result.Success;
+        _bookLoading = false;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (SymbolId == null)
+            return;
+
+        await StreamService.UnsubscribeToOrderBookAsync(SymbolId);
+        await StreamService.UnsubscribeTradeUpdatesAsync(SymbolId);
+        _subbedSymbol = null;
+    }
+}

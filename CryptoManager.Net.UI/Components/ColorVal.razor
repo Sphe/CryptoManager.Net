@@ -1,0 +1,15 @@
+﻿
+<span class="@GetClass()">@GetPrefix()@Value@Suffix</span>
+
+@code {
+
+    [Parameter]
+    public decimal Value { get; set; }
+
+    [Parameter]
+    public string Suffix { get; set; } = string.Empty;
+
+    public string GetPrefix() => Value > 0 ? "+" : "";
+
+    public string GetClass() => Value > 0 ? "val-pos" : Value < 0 ? "val-neg" : "val-neutral";
+}

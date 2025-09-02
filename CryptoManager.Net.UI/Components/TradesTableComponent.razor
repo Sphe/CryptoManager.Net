@@ -1,0 +1,72 @@
+﻿@using CryptoExchange.Net.SharedApis
+@using CryptoManager.Net.UI.Authorization
+@using CryptoManager.Net.UI.Models
+@using CryptoManager.Net.UI.Services;
+@using CryptoManager.Net.UI.Services.Rest
+@using CryptoManager.Net.UI.Services.Stream
+@inject OrderService OrderService
+
+<MudPaper>
+    <MudTable T="ApiUserTrade" ServerData="ServerReload" @ref="_table" OnRowClick="TradeClickEvent" RowsPerPage="RowsPerPage">
+        <HeaderContent>
+            <MudTh><MudTableSortLabel SortLabel="@nameof(ApiUserTrade.CreateTime)" InitialDirection="SortDirection.Descending" T="ApiUserTrade">Time</MudTableSortLabel></MudTh>
+            <MudTh>Side</MudTh>
+            <MudTh><MudTableSortLabel SortLabel="@nameof(ApiUserTrade.Price)" T="ApiUserTrade">Price</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel SortLabel="@nameof(ApiUserTrade.Quantity)" T="ApiUserTrade">Quantity</MudTableSortLabel></MudTh>
+            <MudTh>Fee</MudTh>
+            <MudTh>Role</MudTh>
+        </HeaderContent>
+        <RowTemplate>
+            <MudTd Style="cursor: pointer" DataLabel="Timestamp">@(Formatters.ToLocalTime(context.CreateTime))</MudTd>
+            <MudTd Style="cursor: pointer" DataLabel="Side">@context.OrderSide</MudTd>
+            <MudTd Style="cursor: pointer" DataLabel="Price">@(context.Price?.Normalize().ToString() ?? "-")</MudTd>
+            <MudTd Style="cursor: pointer" DataLabel="Quantity">@(context.Quantity?.Normalize().ToString() ?? "-")</MudTd>
+            <MudTd Style="cursor: pointer" DataLabel="Fee">@(context.Fee?.Normalize().ToString() ?? "-") @(context.FeeAsset)</MudTd>
+            <MudTd Style="cursor: pointer" DataLabel="Role">@(context.Role)</MudTd>
+        </RowTemplate>
+        <NoRecordsContent>
+            @if (FailedToRetrieve)
+            {
+                <MudText>Failed to retrieve trades</MudText>
+            }
+            else
+            {
+                <MudText>@(!Authenticated ? "Unauthenticated" : "No trades found")</MudText>
+            }
+        </NoRecordsContent>
+        <LoadingContent>
+            <MudText>Loading...</MudText>
+        </LoadingContent>
+        <PagerContent>
+            <MudTablePager HideRowsPerPage="true" />
+        </PagerContent>
+    </MudTable>
+</MudPaper>
+
+@code {
+    [Parameter]
+    public bool FailedToRetrieve { get; set; }
+    [Parameter]
+    public bool Authenticated { get; set; }
+    [Parameter]
+    public int RowsPerPage { get; set; } = 5;
+    [Parameter]
+    public required Func<TableState, Task<TableData<ApiUserTrade>>> OnTableReload { get; set; }
+
+    private MudTable<ApiUserTrade>? _table;
+
+    public void Reload() => _table?.ReloadServerData();
+
+    private async Task<TableData<ApiUserTrade>> ServerReload(TableState state, CancellationToken token)
+    {
+        return await OnTableReload.Invoke(state);
+    }
+
+    private void TradeClickEvent(TableRowClickEventArgs<ApiUserTrade> tableRowClickEventArgs)
+    {
+        if (tableRowClickEventArgs.Item == null)
+            return;
+
+
+    }
+}

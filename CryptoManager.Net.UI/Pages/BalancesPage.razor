@@ -1,0 +1,313 @@
+﻿@page "/balances"
+@attribute [Authorize]
+
+@inject BalanceService BalanceService
+@inject ExchangeService ExchangeService
+@inject NavigationManager NavigationManager
+@inject IDialogService DialogService
+@inject StreamService StreamService
+
+@using CryptoManager.Net.UI.Dialogs
+@using CryptoManager.Net.UI.Models
+@using CryptoManager.Net.UI.Services;
+@using CryptoManager.Net.UI.Services.Rest
+@using CryptoManager.Net.UI.Services.Stream
+@implements IDisposable
+
+<PageTitle>Balances | CryptoManager.Net</PageTitle>
+
+<MudGrid Class="breadcrumbs" Spacing="0">
+    <MudItem xs="12">
+        <MudBreadcrumbs Items="breadcrumbs"></MudBreadcrumbs>
+    </MudItem>
+</MudGrid>
+
+<MudGrid>
+    <MudItem xl="8" lg="12" md="12" sm="12" xs="12">
+        <BalancesTableComponent Authenticated="true"
+                                Exchanges="exchanges"
+                                FailedToRetrieve="_balanceConnectionIssues"
+                                IncludeExchange="true"
+                                OnTableReload="LoadBalanceAsync"
+                                OnExchangeChange="OnExchangeChange"
+                                OnBalanceClick="OnBalanceClick"
+                                @ref="_balancesTable" />
+    </MudItem>
+
+    <MudItem xl="4" lg="12" md="12" sm="12" xs="12">
+        <MudGrid>
+            <MudItem xs="12" sm="12" md="6" xl="12">
+                <ValuationComponent Style="padding:30px;" AccountValue="_accountValue" FailedToLoad="_valueConnectionIssues" />
+            </MudItem>
+
+            <MudItem xs="12" sm="12" md="6" xl="12">
+                <MudTable T="ApiBalance" ServerData="ServerReloadExternal" @ref="externalTable">
+                    <ToolBarContent>
+                        <MudText Typo="@Typo.h6">External balances</MudText>
+                        <MudSpacer />
+                        <MudIconButton Icon="@Icons.Material.Filled.Add" OnClick="(x) => AddAsset()" />
+                    </ToolBarContent>
+                    <HeaderContent>
+                        <MudTh><MudTableSortLabel SortLabel="@nameof(ApiBalance.Asset)" T="ApiBalance">Asset</MudTableSortLabel></MudTh>
+                        <MudTh>Total</MudTh>
+                        <MudTh Style="text-align:right"><MudTableSortLabel SortLabel="@nameof(ApiBalance.UsdValue)" InitialDirection="SortDirection.Descending" T="ApiBalance">Value</MudTableSortLabel></MudTh>
+                        <MudTh></MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd Style="cursor: pointer" DataLabel="Asset" @onclick="@(x => NavigationManager.NavigateTo("Assets/" + context.Asset))">@context.Asset</MudTd>
+                        <MudTd DataLabel="Total">@context.Total</MudTd>
+                        <MudTd DataLabel="Value" Style="text-align:right;">@((context.UsdValue ?? 0).ToString("C"))</MudTd>
+                        <MudTd Style="cursor: pointer; text-align: right">
+                            <MudIconButton @onclick="(x) => EditAsset(context)" Icon="@Icons.Material.Filled.Edit" />
+                            <MudIconButton @onclick="(x) => RemoveAsset(context)" Icon="@Icons.Material.Filled.Delete" />
+                        </MudTd>
+                    </RowTemplate>
+                    <NoRecordsContent>
+                        @if (_externalConnectionIssues)
+                        {
+                            <MudText>Failed to retrieve balances</MudText>
+                        }
+                        else
+                        {
+                            <MudText>No balances found</MudText>
+                        }
+                    </NoRecordsContent>
+                    <LoadingContent>
+                        <LoaderComponent />
+                    </LoadingContent>
+                    <PagerContent>
+                        <MudTablePager HideRowsPerPage="true" />
+                    </PagerContent>
+                </MudTable>
+            </MudItem>
+        </MudGrid>
+    </MudItem>
+
+</MudGrid>
+
+
+@code {
+    private BalancesTableComponent? _balancesTable;
+
+    private MudTable<ApiBalance>? externalTable;
+    private string? searchString = null;
+    private string? exchange = null;
+    private bool _balanceConnectionIssues = false;
+    private bool _externalConnectionIssues = false;
+    private bool _valueConnectionIssues = false;
+    private ApiBalanceValuation? _accountValue = null;
+
+    private Page<ApiBalance>? _externalBalances;
+    private Page<ApiBalance>? _balances;
+
+    private List<BreadcrumbItem> breadcrumbs = new List<BreadcrumbItem>
+    {
+        new BreadcrumbItem("Balances", href: "/Balances"),
+    };
+
+    private string[] exchanges = Array.Empty<string>();
+
+    protected override async Task OnInitializedAsync()
+    {
+        await BalanceService.UpdateBalancesAsync(() => Task.CompletedTask, error => Task.CompletedTask);
+
+        var exTask = ExchangeService.GetExchangeNamesAsync(
+            data =>
+            {
+                exchanges = data.ToArray();
+                return Task.CompletedTask;
+            },
+            x => Task.CompletedTask);
+
+        var balTask = BalanceService.GetValueAsync(
+            data =>
+            {
+                _accountValue = data;
+                _valueConnectionIssues = false;
+                return Task.CompletedTask;
+            },
+            error => 
+            {
+                _valueConnectionIssues = true;
+                return Task.CompletedTask;
+            });
+
+        await Task.WhenAll(exTask, balTask);
+
+        StreamService.OnBalanceChanged += HandleBalanceUpdate;
+
+    }
+
+    private Task HandleBalanceUpdate(ApiBalance[] balances)
+    {
+        if (_balances == null)
+            return Task.CompletedTask;
+
+        var changed = false;
+        foreach (var balance in balances)
+        {
+            var localBalance = _balances.Items.SingleOrDefault(x => x.Asset == balance.Asset && x.Exchange == balance.Exchange);
+            if (localBalance == null)
+                continue;
+
+            localBalance.Available = balance.Available;
+            localBalance.Total = balance.Total;
+            localBalance.UsdValue = balance.UsdValue;
+            changed = true;
+        }
+
+        if (changed)
+            _balancesTable?.Reload();
+
+        return Task.CompletedTask;
+    }
+
+    private async Task<TableData<ApiBalance>> LoadBalanceAsync(TableState state, bool refresh)
+    {
+        if (refresh)
+        {
+            _balances = null;
+            await BalanceService.UpdateBalancesAsync(() => Task.CompletedTask, null);
+        }
+
+        if (_balances != null)
+            return new TableData<ApiBalance>() { Items = _balances.Items, TotalItems = _balances.TotalResults };
+
+        await BalanceService.GetBalancesAsync(
+            data =>
+            {
+                _balances = data;
+                _balanceConnectionIssues = false;
+                return Task.CompletedTask;
+            },
+            error =>
+            {
+                _balanceConnectionIssues = true;
+                return Task.CompletedTask;
+            },
+            exchange: (string.IsNullOrEmpty(exchange) || exchange == "All") ? null : exchange,
+            sort: state.SortLabel,
+            sortDirection: state.SortDirection.ToString(),
+            page: state.Page + 1,
+            pageSize: state.PageSize);
+
+        if (_balances == null)
+            return new TableData<ApiBalance>() { Items = Array.Empty<ApiBalance>(), TotalItems = 0 };
+
+        return new TableData<ApiBalance>() { Items = _balances.Items, TotalItems = _balances.TotalResults };
+    }
+
+    private async Task<TableData<ApiBalance>> ServerReloadExternal(TableState state, CancellationToken token)
+    {
+        await BalanceService.GetExternalBalancesAsync(
+            data =>
+            {
+                _externalBalances = data;
+                _externalConnectionIssues = false;
+                return Task.CompletedTask;
+            },
+            error =>
+            {
+                _externalConnectionIssues = true;
+                return Task.CompletedTask;
+            },
+            sort: state.SortLabel,
+            sortDirection: state.SortDirection.ToString(),
+            page: state.Page + 1,
+            pageSize: state.PageSize);
+
+        if (_externalBalances == null)
+            return new TableData<ApiBalance>() { Items = Array.Empty<ApiBalance>(), TotalItems = 0 };
+
+        return new TableData<ApiBalance>() { Items = _externalBalances.Items, TotalItems = _externalBalances.TotalResults };
+    }
+
+    private async Task RemoveAsset(ApiBalance balance)
+    {
+        await BalanceService.RemoveExternalBalanceAsync(
+            async () =>
+            {
+                await (externalTable?.ReloadServerData() ?? Task.CompletedTask);
+            },
+            null,
+            balance.Id);
+    }
+
+    private async Task AddAsset()
+    {
+        var parameters = new DialogParameters<ExternalAssetDialog> { { x => x.Model, new ExternalAssetDialog.AddExternalAsset() } };
+
+        var dialog = await DialogService.ShowAsync<ExternalAssetDialog>("Add external asset", parameters);
+        var result = await dialog.Result;
+
+        if (result == null || result.Canceled)
+            return;
+
+        var resultData = (ExternalAssetDialog.AddExternalAsset)result.Data!;
+        if (string.IsNullOrEmpty(resultData.Asset) || resultData.Quantity == 0)
+            return;
+
+        await BalanceService.SetExternalBalanceAsync(
+            async () =>
+            {
+                await (externalTable?.ReloadServerData() ?? Task.CompletedTask);
+            }, 
+            null,
+            resultData.Asset,
+            resultData.Quantity);
+    }
+
+    private async Task EditAsset(ApiBalance balance)
+    {
+        var model = new ExternalAssetDialog.AddExternalAsset()
+        {
+            Edit = true,
+            Asset = balance.Asset,
+            Quantity = balance.Total
+        };
+        var parameters = new DialogParameters<ExternalAssetDialog> { { x => x.Model, model } };
+
+        var dialog = await DialogService.ShowAsync<ExternalAssetDialog>("Edit external asset", parameters);
+        var result = await dialog.Result;
+
+        if (result == null || result.Canceled)
+            return;
+
+        var resultData = (ExternalAssetDialog.AddExternalAsset)result.Data!;
+        if (string.IsNullOrEmpty(resultData.Asset) || resultData.Quantity == 0)
+            return;
+
+        await BalanceService.SetExternalBalanceAsync(
+            async () =>
+            {
+                await (externalTable?.ReloadServerData() ?? Task.CompletedTask);
+            },
+            null,
+            resultData.Asset,
+            resultData.Quantity);
+    }
+
+    private void OnBalanceClick(ApiBalance balance)
+    {
+        NavigationManager.NavigateTo($"Assets/{balance.Asset}");
+    }
+
+    private void OnSearch(string text)
+    {
+        searchString = text;
+        _balances = null;
+        _balancesTable?.Reload();
+    }
+
+    private void OnExchangeChange(string text)
+    {
+        exchange = text;
+        _balances = null;
+        _balancesTable?.Reload();
+    }
+
+    public void Dispose()
+    {
+        StreamService.OnBalanceChanged -= HandleBalanceUpdate;
+    }
+}

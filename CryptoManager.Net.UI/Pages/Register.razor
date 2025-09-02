@@ -1,0 +1,83 @@
+﻿@page "/Register"
+@using CryptoManager.Net.UI.Authorization
+@using CryptoManager.Net.UI.Dialogs
+@using CryptoManager.Net.UI.Services.Rest
+@inject IDialogService DialogService
+@inject AuthStateProvider AuthProvider
+@inject LoginService LoginService
+@inject NavigationManager NavManager
+@attribute [AllowAnonymous]
+
+<PageTitle>Register | CryptoManager.Net</PageTitle>
+
+<MudPaper Style="padding: 20px;" MaxWidth="500px">
+    <MudTextField @onkeyup="@(CheckEnter)" HelperText="email" @bind-Value="Email" />
+    <MudTextField @onkeyup="@(CheckEnter)" HelperText="password" InputType="InputType.Password" @bind-Value="Password" />
+    <MudTextField @onkeyup="@(CheckEnter)" HelperText="password again" InputType="InputType.Password" @bind-Value="PasswordConfirm" />
+
+    <MudStack AlignItems="AlignItems.End" Style="margin-top: 20px;" Row="true">
+        @if (Error != null)
+        {
+            <MudText Color="Color.Error" Style="line-height: 36px">@Error</MudText>
+        }
+        <MudSpacer />
+        <MudButton OnClick="RegisterUser" ButtonType="ButtonType.Submit" Color="Color.Success">Register</MudButton>
+    </MudStack>
+</MudPaper>
+
+@code {
+    public string Email { get; set; } = string.Empty;
+    public string Password { get; set; } = string.Empty;
+    public string PasswordConfirm { get; set; } = string.Empty;
+    public string? Error{ get; set; }
+
+    private async Task CheckEnter(KeyboardEventArgs e)
+    {
+        if (e.Code == "Enter" || e.Code == "NumpadEnter")
+            await RegisterUser();
+    }
+
+    protected override void OnInitialized()
+    {
+        if (AuthProvider.User != null)
+            NavManager.NavigateTo("/");
+    }
+
+    private async Task RegisterUser()
+    {
+        Error = null;
+
+        if (Password != PasswordConfirm)
+        {
+            Error = "Password don't match";
+            return;
+        }
+
+        if (Email.Length < 6)
+        {
+            Error = "Invalid email";
+            return;
+        }
+
+        if (Password.Length < 8)
+        {
+            Error = "Password should at least be 8 chars";
+            return;
+        }
+
+        var loadingDialog = await DialogService.ShowAsync<LoadingDialog>(null, options: new DialogOptions
+        {
+            BackdropClick = false,
+            CloseOnEscapeKey = false
+        });
+
+        var result = await LoginService.RegisterAsync(Email, Password);
+        loadingDialog.Close();
+        if (!result.Success)
+        {
+            Error = "Registration failed";
+        }
+        else
+            NavManager.NavigateTo("/");
+    }
+}

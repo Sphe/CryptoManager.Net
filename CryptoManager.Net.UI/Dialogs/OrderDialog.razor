@@ -1,0 +1,196 @@
+﻿@using CryptoExchange.Net.SharedApis
+@using CryptoManager.Net.UI.Models
+@using CryptoManager.Net.UI.Services.Rest
+@inject IDialogService DialogService
+@inject OrderService OrderService
+
+<MudDialog >
+    <TitleContent>
+        <b>Order @Id</b>
+    </TitleContent>
+    <DialogContent>
+        <MudGrid>
+            <MudItem xs="6" md="3">
+                <MudTextField Label="Exchange"
+                              Class="input-disabled"
+                              Value="_order?.Exchange"
+                              Margin="Margin.Dense"
+                              Typo="Typo.caption"
+                              Disabled="true" />
+                <MudTextField Label="Symbol"
+                              Class="input-disabled"
+                              Value="GetSymbolName()"
+                              Margin="Margin.Dense"
+                              Typo="Typo.caption"
+                              Disabled="true" />
+                <MudTextField Label="Status"
+                              Class="input-disabled"
+                              Value="_order?.Status"
+                              Margin="Margin.Dense"
+                              Typo="Typo.caption"
+                              Disabled="true" />
+            </MudItem>
+            <MudItem xs="6" md="3">
+                <MudTextField Label="Create time"
+                              Class="input-disabled"
+                              Value="@(Formatters.ToLocalTime(_order?.CreateTime))"
+                              Margin="Margin.Dense"
+                              Typo="Typo.caption"
+                              Disabled="true" />
+                <MudTextField Label="Side"
+                              Class="input-disabled"
+                              Value="_order?.OrderSide"
+                              Margin="Margin.Dense"
+                              Typo="Typo.caption"
+                              Disabled="true" />
+                <MudTextField Label="Type"
+                              Class="input-disabled"
+                              Value="_order?.OrderType"
+                              Margin="Margin.Dense"
+                              Typo="Typo.caption"
+                              Disabled="true" />
+            </MudItem>
+
+            <MudItem xs="6" md="3">
+                <MudTextField Label="Quantity in base asset"
+                              Class="input-disabled"
+                              Value="@(_order?.OrderQuantityBase?.Normalize().ToString() ?? "-")"
+                              Margin="Margin.Dense"
+                              Typo="Typo.caption"
+                              Disabled="true" />
+                <MudTextField Label="Quantity in quote asset"
+                              Class="input-disabled"
+                              Value="@(_order?.OrderQuantityQuote?.Normalize().ToString() ?? "-")"
+                              Margin="Margin.Dense"
+                              Typo="Typo.caption"
+                              Disabled="true" />
+                <MudTextField Label="Filled in base asset"
+                              Class="input-disabled"
+                              Value="@(_order?.QuantityFilledBase?.Normalize().ToString() ?? "-")"
+                              Margin="Margin.Dense"
+                              Typo="Typo.caption"
+                              Disabled="true" />
+            </MudItem>
+            <MudItem xs="6" md="3">
+                <MudTextField Label="Filled in quote asset"
+                              Class="input-disabled"
+                              Value="@(_order?.QuantityFilledQuote?.Normalize().ToString() ?? "-")"
+                              Margin="Margin.Dense"
+                              Typo="Typo.caption"
+                              Disabled="true" />
+                <MudTextField Label="Order price"
+                              Class="input-disabled"
+                              Value="@(_order?.OrderPrice?.Normalize().ToString() ?? "-")"
+                              Margin="Margin.Dense"
+                              Typo="Typo.caption"
+                              Disabled="true" />
+                <MudTextField Label="Average fill price"
+                              Class="input-disabled"
+                              Value="@(_order?.AveragePrice?.Normalize().ToString() ?? "-")"
+                              Margin="Margin.Dense"
+                              Typo="Typo.caption"
+                              Disabled="true" />
+            </MudItem>
+        </MudGrid>
+        
+        @if (_order?.Status == SharedOrderStatus.Open)
+        {
+            <div style="margin-top:10px">
+                <MudButton FullWidth="false" Color="@Color.Success" OnClick="CancelOrder">Cancel</MudButton>
+            </div>
+        }
+
+        <div style="margin-top:10px">
+            <MudText Typo="Typo.subtitle1">Trades</MudText>
+        </div>
+
+        <TradesTableComponent Authenticated="true"
+                              FailedToRetrieve="_connectionIssuesTrades"
+                              OnTableReload="LoadTradesAsync"
+                              RowsPerPage="10"
+                              @ref="_tradesTable" />
+    </DialogContent>
+</MudDialog>
+
+@code {
+    [Parameter]
+    public string Id { get; set; } = string.Empty;
+
+    [CascadingParameter]
+    private IMudDialogInstance? MudDialog { get; set; }
+
+    private void Submit() => MudDialog!.Close(DialogResult.Ok(true));
+
+    private ApiOrder? _order;
+    private bool _connectionIssuesTrades;
+    private TradesTableComponent? _tradesTable;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await OrderService.GetOrderAsync(order =>
+        {
+            _order = order;
+            return Task.CompletedTask;
+        }, null, Id);
+
+    }
+
+    private async Task<TableData<ApiUserTrade>> LoadTradesAsync(TableState state)
+    {
+        await OrderService.UpdateUserTradesAsync(x => Task.CompletedTask, null, Id);
+
+        Page<ApiUserTrade>? trades = null;
+        await OrderService.GetUserTradesAsync(
+            data =>
+            {
+                trades = data;
+                _connectionIssuesTrades = false;
+                return Task.CompletedTask;
+            },
+            error =>
+            {
+                _connectionIssuesTrades = true;
+                return Task.CompletedTask;
+            },
+            null,
+            Id,
+            sort: state.SortLabel,
+            sortDirection: state.SortDirection.ToString(),
+            page: state.Page + 1,
+            pageSize: state.PageSize);
+
+        if (trades == null)
+            return new TableData<ApiUserTrade>() { Items = Array.Empty<ApiUserTrade>(), TotalItems = 0 };
+
+        return new TableData<ApiUserTrade>() { Items = trades.Items, TotalItems = trades.TotalResults };
+    }
+
+    private string GetSymbolName()
+    {
+        if (_order == null)
+            return string.Empty;
+
+        var split = _order.SymbolId.Split("-");
+        return split[1] + "/" + split[2];
+    }
+
+    private async Task CancelOrder()
+    {
+        var loadingDialog = await DialogService.ShowAsync<LoadingDialog>(null, options: new DialogOptions
+        {
+            BackdropClick = false,
+            CloseOnEscapeKey = false
+        });
+
+        await OrderService.CancelOrderAsync(
+            () =>
+            {
+                _order!.Status = SharedOrderStatus.Canceled;
+                return Task.CompletedTask;
+            },
+            null,
+            _order!.Id);
+
+        loadingDialog.Close();
+    }
+}

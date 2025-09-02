@@ -1,0 +1,135 @@
+﻿@inject NavigationManager NavigationManager;
+
+<MudTable T="ApiBalance" ServerData="ServerReload" @ref="_table" OnRowClick="(x) => OnBalanceClick?.Invoke(x.Item!)">
+    <ToolBarContent>
+        <MudText Typo="@Typo.h6">Balances</MudText>
+        @if (IncludeExchange)
+        {
+            <MudSpacer />
+            <MudSelect T="string" ValueChanged="@(s=>OnExchangeChanged(s))" Placeholder="Exchange" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Web" IconSize="Size.Medium" Class="mt-0">
+                <MudSelectItem Value="@("All")" T="string"></MudSelectItem>
+                @foreach (var exchange in Exchanges)
+                {
+                    <MudSelectItem Value="@exchange" T="string">@exchange</MudSelectItem>
+                }
+            </MudSelect>
+        }
+        else if (Search)
+        {
+            <MudSpacer />
+            <MudTextField Style="max-width: 400px;" T="string" ValueChanged="@(s=>OnSearched(s))" Placeholder="Search" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" IconSize="Size.Medium" Class="mt-0"></MudTextField>
+        }
+        <MudIconButton Size="Size.Medium" Icon="@Icons.Material.Filled.Refresh" OnClick="RefreshTable" />
+    </ToolBarContent>
+    <HeaderContent>
+        @if (IncludeExchange)
+        {
+            <MudTh><MudTableSortLabel SortLabel="@nameof(ApiBalance.Exchange)" T="ApiBalance">Exchange</MudTableSortLabel></MudTh>
+        }
+        @if (IncludeAsset)
+        {
+            <MudTh><MudTableSortLabel SortLabel="@nameof(ApiBalance.Asset)" T="ApiBalance">Asset</MudTableSortLabel></MudTh>
+        }
+        <MudTh>Available</MudTh>
+        <MudTh>Total</MudTh>
+        <MudTh Style="text-align:right"><MudTableSortLabel SortLabel="@nameof(ApiBalance.UsdValue)" InitialDirection="SortDirection.Descending" T="ApiBalance">Value</MudTableSortLabel></MudTh>
+    </HeaderContent>
+    <RowTemplate>
+        @if (IncludeExchange)
+        {
+            <MudTd Style="cursor: pointer" DataLabel="Exchange" @onclick="@(x => NavigationManager.NavigateTo("Exchanges/" + context.Exchange))">@context.Exchange</MudTd>
+        }
+        @if (IncludeAsset)
+        {
+            <MudTd Style="cursor: pointer" DataLabel="Asset" @onclick="@(x => OnAssetClick(context))">@context.Asset</MudTd>
+        }
+        <MudTd DataLabel="Available">@context.Available?.Normalize()</MudTd>
+        <MudTd DataLabel="Total">@context.Total.Normalize()</MudTd>
+        <MudTd DataLabel="Value" Style="text-align:right;">@((context.UsdValue ?? 0).ToString("C"))</MudTd>
+    </RowTemplate>
+    <NoRecordsContent>
+        @if (FailedToRetrieve)
+        {
+            <MudText>Failed to retrieve balances</MudText>
+        }
+        else
+        {
+            <MudText>No balances found</MudText>
+        }
+    </NoRecordsContent>
+    <LoadingContent>
+        <LoaderComponent />
+    </LoadingContent>
+    <PagerContent>
+        <MudTablePager HideRowsPerPage="true" />
+    </PagerContent>
+</MudTable>
+
+@code {
+    [Parameter]
+    public bool FailedToRetrieve { get; set; }
+    [Parameter]
+    public bool IncludeExchange { get; set; }
+    [Parameter]
+    public bool Search { get; set; }
+    [Parameter]
+    public bool Authenticated { get; set; }
+    [Parameter]
+    public bool IncludeAsset { get; set; } = true;
+    [Parameter]
+    public string[] Exchanges { get; set; } = [];
+    [Parameter]
+    public required Func<TableState, bool, Task<TableData<ApiBalance>>> OnTableReload { get; set; }
+    [Parameter]
+    public required Action<ApiBalance> OnBalanceClick { get; set; }
+    [Parameter]
+    public Action<string?>? OnExchangeChange { get; set; }
+    [Parameter]
+    public Action<string?>? OnSearch { get; set; }
+
+    private MudTable<ApiBalance>? _table;
+
+    public void Reload() => _table?.ReloadServerData();
+
+    private async Task RefreshTable()
+    {
+        if (_table == null)
+            return;
+
+        await OnTableReload.Invoke(new TableState
+        {
+            Page = _table.CurrentPage,
+            PageSize = _table.RowsPerPage,
+            SortDirection = _table.Context.SortDirection,
+            SortLabel = _table.SortLabel
+        }, true);
+    }
+
+    private async Task<TableData<ApiBalance>> ServerReload(TableState state, CancellationToken token)
+    {
+        return await OnTableReload.Invoke(state, false);
+    }
+
+    private void OnAssetClick(ApiBalance balance)
+    {
+        if (OnBalanceClick != null)
+        {
+            OnBalanceClick(balance);
+        }
+        else
+        {
+            NavigationManager.NavigateTo("Assets/" + balance.Asset);
+        }
+    }
+
+    private void OnSearched(string text)
+    {
+        OnSearch?.Invoke(text);
+    }
+
+    private void OnExchangeChanged(string text)
+    {
+        var exchange = text == "All" ? null : text;
+        OnExchangeChange?.Invoke(exchange);
+    }
+}

@@ -1,0 +1,24 @@
+# @name exchanges
+
+GET {{HostAddress}}/exchanges
+Accept: application/json
+
+###
+
+@query=Bit
+@orderBy=UsdVolume
+@orderDirection=Descending
+@page=1
+@pageSize=10
+
+GET {{HostAddress}}/exchanges?query={{query}}&orderBy={{orderBy}}&orderDirection={{orderDirection}}&page={{page}}&pageSize={{pageSize}}
+Accept: application/json
+
+###
+
+@exchange=Bybit
+
+GET {{HostAddress}}/exchanges/{{exchange}}
+Accept: application/json
+
+###

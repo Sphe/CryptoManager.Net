@@ -1,0 +1,33 @@
+﻿<MudDialog>
+    <TitleContent>
+        @Title
+    </TitleContent>
+    <DialogContent>
+        @Message
+    </DialogContent>
+    <DialogActions>
+        <MudStack Row="true">
+            @if (ShowCancel)
+            {
+                <MudButton Color="Color.Primary" OnClick="Cancel">Cancel</MudButton>
+            }
+            <MudButton Color="Color.Success" OnClick="Submit">Ok</MudButton>
+        </MudStack>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [Parameter]
+    public string Title { get; set; } = string.Empty;
+    [Parameter]
+    public string Message { get; set; } = string.Empty;
+    [Parameter]
+    public bool ShowCancel { get; set; }
+
+    [CascadingParameter]
+    private IMudDialogInstance? MudDialog { get; set; }
+
+    private void Submit() => MudDialog!.Close(DialogResult.Ok(true));
+
+    private void Cancel() => MudDialog!.Cancel();
+}

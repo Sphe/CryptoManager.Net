@@ -1,0 +1,89 @@
+﻿@using CryptoExchange.Net.SharedApis
+@using CryptoManager.Net.Models.Response
+@implements IDisposable
+
+<MudPaper>
+    @if (!Loading && !Connected)
+    {
+        <ErrorComponent Text="Failed to connect trades stream" ShowRetry="true" OnRetry="OnRetryConnect" />
+    }
+    else @if (Loading)
+    {
+        <LoaderComponent />
+    }
+    else
+    {
+        <MudSimpleTable Dense="true">
+            <thead>
+                <tr>
+                    @if (!Compact)
+                    {
+                        <td class="dense-header">Time</td>
+                    }
+                    <td class="dense-header" style="@(Compact ? "": "text-align: right;")">Price</td>
+                    <td class="dense-header" style="text-align: right;">Quantity</td>
+                </tr>
+            </thead>
+            <tbody>
+                @lock (_tradeLock)
+                {
+                    if (!_trades.Any())
+                    {
+                        <MudText Typo="Typo.body2" Style="padding: 10px;">No trades yet</MudText>
+                    }
+
+                    @foreach (var trade in _trades)
+                    {
+                        <tr>
+                            @if (!Compact)
+                            {
+                                <td width="100px">@trade.Timestamp.ToString("mm:ss.fff")</td>
+                            }
+                            <td width="120px" style="@(Compact ? "": "text-align: right;")" class="@(trade.Side == null ? "" : trade.Side == SharedOrderSide.Buy ? "val-pos" : "val-neg")">@Formatters.FormatPrice(trade.Price)</td>
+                            <td style="padding-left: 10px; text-align: right;" class="@(trade.Side == null ? "" : trade.Side == SharedOrderSide.Buy ? "val-pos" : "val-neg")">@Formatters.FormatQuantity(trade.Quantity)</td>
+                        </tr>
+                    }
+                }
+            </tbody>
+        </MudSimpleTable>
+    }
+</MudPaper>
+
+@code {
+    private object _tradeLock = new object();
+    private List<ApiTrade> _trades = new List<ApiTrade>();
+    private Timer? _timer;
+
+    [Parameter]
+    public int Limit { get; set; } = 15;
+    [Parameter]
+    public bool Compact { get; set; } = false;
+    [Parameter]
+    public bool Connected { get; set; }
+    [Parameter]
+    public bool Loading { get; set; }
+    [Parameter]
+    public Func<Task>? OnRetryConnect { get; set; }
+
+    protected override void OnInitialized()
+    {
+        _timer = new Timer(x => InvokeAsync(StateHasChanged), null, TimeSpan.FromMilliseconds(200), TimeSpan.FromMilliseconds(200));
+    }
+
+    public void Update(ApiTrade[] data)
+    {
+        lock (_tradeLock)
+        {
+            foreach (var trade in data)
+                _trades.Insert(0, trade);
+
+            while (_trades.Count > Limit)
+                _trades.RemoveAt(Limit);
+        }
+    }
+
+    public void Dispose()
+    {
+        _timer?.Dispose();
+    }
+}

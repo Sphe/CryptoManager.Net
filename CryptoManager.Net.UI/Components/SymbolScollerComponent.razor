@@ -1,0 +1,96 @@
+﻿@using CryptoManager.Net.UI.Authorization
+@using CryptoManager.Net.UI.Models
+@using CryptoManager.Net.UI.Services;
+@using CryptoManager.Net.UI.Services.Rest
+@using CryptoManager.Net.UI.Services.Stream
+@inject SymbolService SymbolService
+@inject NavigationManager NavigationManager
+@inject AuthStateProvider UserState
+@inject StreamService StreamService
+@implements IDisposable
+
+<div class="symbol-scroller-outer" style="margin-top: 0px">
+    <div style="flex: 1; overflow: hidden;border-right: 1px solid #555;">
+        <div class="marquee">
+            <div class="marquee-item">
+                <div class="scroller">
+                    @foreach (var asset in _assets)
+                    {
+                        <div class="symbol-scroller-item">
+                            <a href="/Assets/@asset.Name">
+                                <div class="symbol-scroller-item-name">
+                                    @asset.Name
+                                </div>
+                                <div class="symbol-scroller-item-value">
+                                    <span>$@Formatters.FormatPrice(asset.Value)</span> (<ColorVal Value="Math.Round(asset.ChangePercentage ?? 0, 2)" Suffix="%" />)
+                                </div>
+                            </a>
+                        </div>
+                    }
+                </div>
+                <div class="scroller">
+                    @foreach (var asset in _assets)
+                    {
+                        <div class="symbol-scroller-item">
+                            <a href="/Assets/@asset.Name">
+                                <div class="symbol-scroller-item-name">
+                                    @asset.Name
+                                </div>
+                                <div class="symbol-scroller-item-value">
+                                    <span>$@Formatters.FormatPrice(asset.Value)</span> (<ColorVal Value="Math.Round(asset.ChangePercentage ?? 0, 2)" Suffix="%" />)
+                                </div>
+                            </a>
+                        </div>
+                    }
+                </div>
+            </div>
+        </div>
+    </div>
+    <div style="line-height: 30px; text-align: right; padding: 0 25px;">
+        <MudTooltip Placement="Placement.Left">
+            <ChildContent>
+                @if (StreamService.Connected && StreamService.Authenticated)
+                {
+                    <div>Connected, authenticated</div>
+                }
+                else if (StreamService.Connected)
+                {
+                    <div>Connected</div>
+                }
+                else
+                {
+                    <div>Disconnected</div>
+                }
+            </ChildContent>
+        </MudTooltip>
+    </div>
+</div>
+
+@code {
+    private IEnumerable<ApiAsset> _assets = Array.Empty<ApiAsset>();
+    private Timer? _timer;
+
+    protected override void OnInitialized()
+    {
+        _timer = new Timer(async (x) => await UpdateAssetsAsync(), null, TimeSpan.Zero, TimeSpan.FromSeconds(30));
+        StreamService.OnStatusChanged += () => InvokeAsync(StateHasChanged);
+    }
+
+    private async Task UpdateAssetsAsync()
+    {
+        await SymbolService.GetAssetsAsync(
+            data =>
+            {
+                _assets = data.Items;
+                return Task.CompletedTask;
+            }, 
+            error => Task.CompletedTask, assetType: AssetType.Crypto, page: 1, pageSize: 15);
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        _timer?.Dispose();
+    }
+}

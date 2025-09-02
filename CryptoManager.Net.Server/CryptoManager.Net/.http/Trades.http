@@ -1,0 +1,25 @@
+
+# @name login
+POST {{HostAddress}}/users/login
+Accept: application/json
+Content-Type: application/json
+
+{
+    "email": "user1@test.com",
+    "password": "password"
+}
+
+###
+
+GET {{HostAddress}}/trades?symbol=Bitfinex-ETH-UST&page=1&pageSize=3
+Accept: application/json
+Authorization: Bearer {{login.response.body.$.data.jwt}}
+
+###
+
+@symbol=Bitfinex-ETH-USDT
+@orderId=1-Bitfinex-ETH-UST-203687722812
+
+POST {{HostAddress}}/trades/update?symbol={{symbol}}&orderId={{orderId}}
+Accept: application/json
+Authorization: Bearer {{login.response.body.$.data.jwt}}

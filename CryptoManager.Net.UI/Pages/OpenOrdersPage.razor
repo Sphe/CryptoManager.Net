@@ -1,0 +1,228 @@
+﻿@page "/orders/open"
+@attribute [Authorize]
+
+@inject IDialogService DialogService
+@inject OrderService OrderService
+@inject ExchangeService ExchangeService
+@inject NavigationManager NavigationManager
+@inject StreamService StreamService
+@using CryptoExchange.Net.SharedApis
+@using CryptoManager.Net.UI.Dialogs
+@using CryptoManager.Net.UI.Models
+@using CryptoManager.Net.UI.Services;
+@using CryptoManager.Net.UI.Services.Rest
+@using CryptoManager.Net.UI.Services.Stream
+@implements IDisposable
+
+<PageTitle>Open Orders | CryptoManager.Net</PageTitle>
+
+<MudGrid Class="breadcrumbs" Spacing="0">
+    <MudItem xs="12">
+        <MudBreadcrumbs Items="breadcrumbs"></MudBreadcrumbs>
+    </MudItem>
+</MudGrid>
+<MudPaper>
+    <MudToolBar>
+        <MudStack Row="true" Justify="Justify.FlexEnd" Style="width: 100%;">
+            <MudSelect OuterClass="no-flex" Style="width: 120px;" T="string" ValueChanged="@(s=>OnExchangeChange(s))" Placeholder="Exchange" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Web" IconSize="Size.Medium" Class="mt-0">
+                <MudSelectItem Value="@("All")" T="string"></MudSelectItem>
+                @foreach (var exchange in _exchanges)
+                {
+                    <MudSelectItem Value="@exchange" T="string">@exchange</MudSelectItem>
+                }
+            </MudSelect>
+            <MudTextField @bind-Value="_baseAsset" Class="no-flex mt-0" Style="margin-left: 10px;" Placeholder="Base asset" @onkeyup="@(CheckEnter)" />
+            <MudTextField @bind-Value="_quoteAsset" Class="no-flex mt-0" Style="margin-left: 10px;" Placeholder="Quote asset" @onkeyup="@(CheckEnter)" />
+            <MudIconButton Icon="@Icons.Material.Filled.Search" OnClick="x => _ordersTable?.Reload()" />
+            <MudIconButton Size="Size.Medium" Icon="@Icons.Material.Filled.Refresh" OnClick="Refresh" />
+        </MudStack>
+    </MudToolBar>
+    <OrdersTableComponent @ref="_ordersTable"
+                          Open="true"
+                          IncludeSymbolInfo="true"
+                          Authenticated="true"
+                          FailedToRetrieve="@_connectionIssues"
+                          OnTableReload="@LoadAsync"
+                          OnOrderClick="@RowClickEvent"
+                          OnOrderCancel="@OnCancelOrder" />
+</MudPaper>
+
+@code {
+    private string? _exchange = null;
+    private string? _baseAsset = null;
+    private string? _quoteAsset = null;
+    private bool _connectionIssues = false;
+    private OrdersTableComponent? _ordersTable;
+
+    private List<ApiOrder>? _localOrders;
+    private int _totalOrderCount;
+    private string _sortDirection = "CreateTime";
+
+    private List<BreadcrumbItem> breadcrumbs = new List<BreadcrumbItem>
+    {
+        new BreadcrumbItem("Open Orders", href: "/orders/open"),
+    };
+
+    private IEnumerable<string> _exchanges = Array.Empty<string>();
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ExchangeService.GetExchangeNamesAsync(
+            data =>
+            {
+                _exchanges = data;
+                return Task.CompletedTask;
+            },
+            error => Task.CompletedTask);
+
+        await OrderService.UpdateOpenOrdersAsync(() => Task.CompletedTask, null);
+        StreamService.OnOrderChanged += HandleOrderUpdate;
+    }
+
+    private Task HandleOrderUpdate(ApiOrder[] orders)
+    {
+        if (_localOrders == null) // No local list; nothing to do with update
+            return Task.CompletedTask;
+
+        foreach (var order in orders)
+        {
+            var symbolParts = order.SymbolId.Split("-");
+            if (!string.IsNullOrEmpty(_exchange) && symbolParts[0] != _exchange)
+                continue;
+
+            if (!string.IsNullOrEmpty(_baseAsset) && symbolParts[1] != _baseAsset)
+                continue;
+
+            if (!string.IsNullOrEmpty(_quoteAsset) && symbolParts[2] != _quoteAsset)
+                continue;
+
+            var localOrder = _localOrders.SingleOrDefault(x => x.Id == order.Id);
+            if (localOrder != null)
+            {
+                // We have this order in the current list; update it
+                localOrder.Status = order.Status;
+                localOrder.AveragePrice = order.AveragePrice;
+                localOrder.QuantityFilledBase = order.QuantityFilledBase;
+                localOrder.QuantityFilledQuote = order.QuantityFilledQuote;
+            }
+            else
+            {
+                // We don't have this order in the current list
+
+                if (order.Status != SharedOrderStatus.Open)
+                    // The new order is not open
+                    continue;
+
+                if (_sortDirection == "CreateTime" && order.CreateTime > _localOrders.Max(x => x.CreateTime))
+                {
+                    _localOrders.Insert(0, order);
+                    _totalOrderCount += 1;
+                }
+
+            }
+        }
+
+        _ordersTable?.Reload();
+        return Task.CompletedTask;
+    }
+
+    private void CheckEnter(KeyboardEventArgs e)
+    {
+        if (e.Code == "Enter" || e.Code == "NumpadEnter")
+            _ordersTable?.Reload();
+    }
+
+    private async Task Refresh()
+    {
+        await OrderService.UpdateOpenOrdersAsync(() => Task.CompletedTask, null);
+        _localOrders = null;
+
+        _ordersTable?.Reload();
+    }
+
+    private async Task<TableData<ApiOrder>> LoadAsync(TableState state)
+    {
+        _sortDirection = state.SortLabel?.ToString() ?? "CreateTime";
+        if (_localOrders != null)
+            return new TableData<ApiOrder>() { Items = _localOrders, TotalItems = _totalOrderCount };
+
+        await OrderService.GetOpenOrdersAsync(
+            data =>
+            {
+                _localOrders = data.Items.ToList();
+                _totalOrderCount = data.TotalResults;
+                _connectionIssues = false;
+                return Task.CompletedTask;
+            },
+            x => 
+            {
+                _localOrders = null;
+                _totalOrderCount = 0;
+                _connectionIssues = true;
+                return Task.CompletedTask;
+            },
+            _exchange,
+            _baseAsset,
+            _quoteAsset,
+            sort: state.SortLabel,
+            sortDirection: state.SortDirection.ToString(),
+            page: state.Page + 1,
+            pageSize: state.PageSize);
+
+        return new TableData<ApiOrder>() { Items = _localOrders, TotalItems = _totalOrderCount };
+    }
+
+    private void RowClickEvent(TableRowClickEventArgs<ApiOrder> tableRowClickEventArgs)
+    {
+        if (tableRowClickEventArgs.Item == null)
+            return;
+
+        NavigationManager.NavigateTo($"Orders/{tableRowClickEventArgs.Item.Id}");
+    }
+
+    private void OnExchangeChange(string text)
+    {
+        _exchange = text == "All" ? null : text;
+        _localOrders = null;
+        _ordersTable?.Reload();
+    }
+
+    private async Task RowClickEvent(ApiOrder order)
+    {
+        var orderDialog = await DialogService.ShowAsync<OrderDialog>(null, new DialogParameters<OrderDialog>
+        {
+            { x => x.Id, order.Id },
+        }, new DialogOptions
+        {
+            MaxWidth = MaxWidth.Large,
+            FullWidth = true,
+            CloseButton = true
+        });
+        await orderDialog.Result;
+    }
+
+    public void Dispose()
+    {
+        StreamService.OnOrderChanged -= HandleOrderUpdate;
+    }
+
+    private async Task OnCancelOrder(ApiOrder order)
+    {
+        var loadingDialog = await DialogService.ShowAsync<LoadingDialog>(null, options: new DialogOptions
+        {
+            BackdropClick = false,
+            CloseOnEscapeKey = false
+        });
+
+        await OrderService.CancelOrderAsync(
+            () =>
+            {
+                return Task.CompletedTask;
+            },
+            null,
+            order.Id);
+
+        loadingDialog.Close();
+        _ordersTable?.Reload();
+    }
+}

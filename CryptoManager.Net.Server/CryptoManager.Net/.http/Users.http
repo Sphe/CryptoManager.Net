@@ -1,0 +1,28 @@
+
+# @name login
+POST {{HostAddress}}/users/login
+Accept: application/json
+Content-Type: application/json
+
+{
+    "email": "user1@test.com",
+    "password": "password"
+}
+
+###
+
+POST {{HostAddress}}/users/register
+Accept: application/json
+Content-Type: application/json
+
+{
+    "email": "user1@test.com",
+    "password": "password"
+}
+###
+
+GET {{HostAddress}}/users
+Accept: application/json
+Authorization: Bearer {{login.response.body.$.data.jwt}}
+
+###

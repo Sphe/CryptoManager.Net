@@ -1,0 +1,56 @@
+
+# @name login
+POST {{HostAddress}}/users/login
+Accept: application/json
+Content-Type: application/json
+
+{
+    "email": "user1@test.com",
+    "password": "password"
+}
+
+###
+
+GET {{HostAddress}}/orders/open?symbol=Bitfinex-ETH-UST&page=1&pageSize=10
+Accept: application/json
+Authorization: Bearer {{login.response.body.$.data.jwt}}
+
+###
+
+GET {{HostAddress}}/orders/closed?symbol=Bitfinex-ETH-UST&page=1&pageSize=10
+Accept: application/json
+Authorization: Bearer {{login.response.body.$.data.jwt}}
+
+###
+
+@symbol=Bitfinex-ETH-USDT
+
+POST {{HostAddress}}/orders/update?symbol={{symbol}}
+Accept: application/json
+Authorization: Bearer {{login.response.body.$.data.jwt}}
+
+###
+
+@symbol=Bitfinex-ETH-USDT
+
+POST {{HostAddress}}/orders
+Accept: application/json
+Content-Type: application/json
+Authorization: Bearer {{login.response.body.$.data.jwt}}
+
+{
+  "symbol": "Bitfinex-ETH-USDT",
+  "OrderSide": "Buy",
+  "OrderType": "Limit",
+  "TimeInForce": "GoodTillCanceled",
+  "LimitPrice": 1600,
+  "BaseQuantity": 0.01
+}
+
+###
+
+@id=1-Bitfinex-ETH-UST-203764858310
+
+DELETE {{HostAddress}}/orders/{{id}}
+Accept: application/json
+Authorization: Bearer {{login.response.body.$.data.jwt}}

@@ -1,0 +1,111 @@
+﻿@using CryptoManager.Net.UI.Models
+@using CryptoManager.Net.UI.Services;
+@using CryptoManager.Net.UI.Services.Rest
+@inject BalanceService BalanceService
+
+<MudPaper Style="padding: 30px">
+    @if (_loading)
+    {
+        <LoaderComponent />
+    }
+    else
+    {
+        @if (_connectionIssues)
+        {
+            <MudElement Style="position: absolute; right: 10px; top: 10px;">
+                <MudTooltip Text="Connection interrupted">
+                    <MudIcon Icon="@Icons.Material.Filled.Warning" Size="Size.Small"></MudIcon>
+                </MudTooltip>
+            </MudElement>
+        }
+
+        <MudStack Style="margin-top: -15px; margin-left: -15px;" Justify="Justify.SpaceBetween" Row="true" >
+            <MudText Style="font-size: 16px;color: #666">portfolio value</MudText>
+            <MudStack Row="true">
+                <MudText Style=@("font-size: 12px; color: #666; cursor:pointer;" + (_currentPeriod == "1w" ? "text-decoration: underline" : "")) @onclick="@(x => LoadData("1w"))">1w</MudText>
+                <MudText Style=@("font-size: 12px; color: #666; cursor:pointer;" + (_currentPeriod == "1m" ? "text-decoration: underline" : "")) @onclick="@(x => LoadData("1m"))">1m</MudText>
+                <MudText Style=@("font-size: 12px; color: #666; cursor:pointer;" + (_currentPeriod == "1y" ? "text-decoration: underline" : "")) @onclick="@(x => LoadData("1y"))">1y</MudText>
+            </MudStack>
+        </MudStack>
+
+        if (_notEnoughDataPoints)
+        {
+            <MudText Style="padding: 40px 0 20px 0; text-align: center;" >At least 2 data points required to show value chart</MudText>            
+        }
+        else
+        {
+            <MudChart ChartType="ChartType.Line" ChartSeries="@Series" XAxisLabels="@XAxisLabels" Width="100%" Height="100%" ChartOptions="@Options" />
+        }
+    }
+</MudPaper>
+
+@code {
+    private bool _loading;
+    private bool _notEnoughDataPoints;
+    private bool _connectionIssues;
+    private string _currentPeriod = "1w";
+
+    public ChartOptions Options = new ChartOptions()
+    {
+        ShowLegend = false,
+        YAxisFormat = "C0"
+    };
+
+    public List<ChartSeries> Series = new List<ChartSeries>();
+    public string[] XAxisLabels = new string[0];
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadData("1w");
+    }
+
+    private async Task LoadData(string period)
+    {
+        _currentPeriod = period;
+        _loading = true;
+        await BalanceService.GetHistoryAsync(
+            async data =>
+            {
+                if (data.Length <= 1)
+                {
+                    _loading = false;
+                    _notEnoughDataPoints = true;
+                    return;
+                }
+
+                Series.Clear();
+
+                Series.Add(new ChartSeries()
+                {
+                    Name = "Portfolio value",
+                    Data = data!.Select(x => (double)x.Value).ToArray()
+                });
+
+                if (period == "1y")
+                    XAxisLabels = data!.Select(x => x.Timestamp.ToString("MM/yy")).ToArray();
+                else
+                    XAxisLabels = data!.Select(x => x.Timestamp.ToString("dd/MM")).ToArray();
+                var value = data!.Max(x => x.Value) - data!.Min(x => x.Value);
+                var valueTicks = value / 5;
+                var interval = 10;
+                if (value > 500)
+                    interval = 100;
+                if (value > 5000)
+                    interval = 1000;
+                if (value > 50000)
+                    interval = 10000;
+
+                Options.YAxisTicks = (int)(valueTicks - (valueTicks % interval));
+
+                _loading = false;
+                _connectionIssues = false;
+                await InvokeAsync(StateHasChanged);
+            },
+            async error =>
+            {
+                _connectionIssues = true;
+                _loading = false;
+                await InvokeAsync(StateHasChanged);
+            }, period);
+    }
+}

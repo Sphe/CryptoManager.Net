@@ -1,0 +1,10 @@
+﻿@using System.Net
+@inject NavigationManager NavigationManager
+
+@code {
+    protected override void OnAfterRender(bool firstRender)
+    {
+        var forward = NavigationManager.Uri.Replace(NavigationManager.BaseUri, "");
+        NavigationManager.NavigateTo("/login?redirect=" + WebUtility.UrlEncode(forward));
+    }
+}

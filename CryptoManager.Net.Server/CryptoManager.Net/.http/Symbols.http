@@ -1,0 +1,25 @@
+# @name symbols
+
+GET {{HostAddress}}/symbols
+Accept: application/json
+
+###
+
+@exchange=Binance
+@query=BTC
+@baseAsset=BTC
+@quoteAsset=USDT
+@orderBy=QuoteVolume
+@orderDirection=Descending
+@page=1
+@pageSize=10
+
+GET {{HostAddress}}/symbols?query={{query}}&exchange={{exchange}}&baseAsset={{baseAsset}}&quoteAsset={{quoteAsset}}&orderBy={{orderBy}}&orderDirection={{orderDirection}}&page={{page}}&pageSize={{pageSize}}
+Accept: application/json
+
+###
+
+@id=Binance-BTC-USDT
+
+GET {{HostAddress}}/symbols/{{id}}
+Accept: application/json

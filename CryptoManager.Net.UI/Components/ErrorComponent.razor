@@ -1,0 +1,20 @@
+﻿<div class="loader-wrapper">
+    <MudIcon Icon="@Icons.Material.Filled.Error" Size="Size.Large" />
+    <MudText>@Text</MudText>
+    @if (ShowRetry)
+    {
+        <MudButton OnClick="async (x) => { if (OnRetry != null) await OnRetry(); }">Retry</MudButton>
+    }
+</div>
+
+@code{
+
+    [Parameter]
+    public string? Text { get; set; }
+
+    [Parameter]
+    public bool ShowRetry { get; set; }
+
+    [Parameter]
+    public Func<Task>? OnRetry { get; set; }
+}

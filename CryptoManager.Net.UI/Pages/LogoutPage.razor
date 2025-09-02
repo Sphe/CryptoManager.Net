@@ -1,0 +1,18 @@
+﻿@page "/logout"
+@using CryptoManager.Net.UI.Authorization
+@using CryptoManager.Net.UI.Services.Rest
+@inject LoginService LoginService
+@attribute [AllowAnonymous]
+
+<PageTitle>Logout | CryptoManager.Net</PageTitle>
+
+<MudPaper Style="padding: 20px;" MaxWidth="500px">
+    You've been logged out
+</MudPaper>
+
+@code {
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        await LoginService.LogoutAsync();
+    }
+}

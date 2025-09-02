@@ -1,0 +1,124 @@
+﻿@using CryptoManager.Net.UI.Models.ApiModels.Requests
+@using CryptoManager.Net.UI.Models
+@using CryptoManager.Net.UI.Services
+@using CryptoManager.Net.UI.Services.Rest
+@using System.Net
+@inject IDialogService DialogService
+@inject ExchangeService ExchangeService
+@inject ApiKeyService ApiKeyService
+
+<MudDialog>
+    <TitleContent>
+        Add API key
+    </TitleContent>
+    <DialogContent>
+        <MudStack Style="width: 300px">
+            <MudSelect T="string" HelperText="Exchange" ValueChanged="ExchangeChanged">
+                @foreach(var exchange in Exchanges){
+                    <MudSelectItem Value="@exchange">@exchange</MudSelectItem>
+                }
+            </MudSelect>     
+            <MudSelect T="string" @bind-Value="ExchangeEnvironment" HelperText="Environment">
+                @foreach (var environment in ExchangeEnvironments)
+                {
+                    <MudSelectItem Value="@environment">@environment</MudSelectItem>
+                }
+            </MudSelect>
+            <MudTextField T="string" HelperText="Key" @bind-Value="Key" @onchange="x => _valid = null" />
+            <MudTextField T="string" HelperText="Secret" @bind-Value="Secret" @onchange="x => _valid = null" />
+            <MudTextField T="string" HelperText="Pass" @bind-Value="Pass" @onchange="x => _valid = null" />
+        </MudStack>
+    </DialogContent>
+    <DialogActions>
+        <MudButton Color="Color.Success" Disabled="@(_loading)" OnClick="Validate">Validate</MudButton>
+        <MudButton Color="@(_valid == true ? Color.Success : Color.Primary)" Disabled="@(_loading || _valid != true)" OnClick="Submit">Ok</MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    private string[] Exchanges { get; set; } = new string[0];
+    private string[] ExchangeEnvironments { get; set; } = new string[0];
+    private bool? _valid;
+    private bool _loading = false;
+
+    public string Exchange { get; set; } = string.Empty;
+    public string ExchangeEnvironment { get; set; } = string.Empty;
+    public string Key { get; set; } = string.Empty;
+    public string Secret { get; set; } = string.Empty;
+    public string? Pass { get; set; }
+
+    [Parameter]
+    public string[] ExchangeAlreadySet { get; set; } = [];
+
+    [CascadingParameter]
+    private IMudDialogInstance? MudDialog { get; set; }
+
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ExchangeService.GetExchangeNamesAsync(
+            data =>
+            {
+                Exchanges = data.Where(x => !ExchangeAlreadySet.Contains(x)).ToArray();
+                return Task.CompletedTask;
+            },
+            null);
+    }
+
+    private async Task Validate()
+    {
+        _loading = true;
+
+        var loadingDialog = await DialogService.ShowAsync<LoadingDialog>();
+
+        await ApiKeyService.ValidateApiKeyAsync(
+            async data =>
+            {
+                _valid = true;
+                _loading = false;
+                await Task.Delay(500);
+                ((LoadingDialog)loadingDialog.Dialog!).SetText("OK");
+                await InvokeAsync(StateHasChanged);
+
+                await Task.Delay(2000);
+                loadingDialog.Close();
+            },
+            async error =>
+            {
+                _valid = false;
+                _loading = false;
+                var passRequired = error.Code == "-10002";
+
+                await Task.Delay(500);
+                ((LoadingDialog)loadingDialog.Dialog!).SetText(passRequired ? "Passphrase required" : "Invalid");
+                await InvokeAsync(StateHasChanged);
+
+                await Task.Delay(2000);
+                loadingDialog.Close();
+            }, Exchange, ExchangeEnvironment, Key, WebUtility.UrlEncode(Secret), Pass);
+
+        await loadingDialog.Result;
+    }
+
+    private void Submit() => MudDialog!.Close(DialogResult.Ok(new AddApiKeyRequest
+    {
+        Exchange = Exchange,
+        Environment = ExchangeEnvironment,
+        Key = Key,
+        Secret = WebUtility.UrlEncode(Secret),
+        Pass = Pass
+    }));
+
+    private void Cancel() => MudDialog!.Cancel();
+
+    private async Task ExchangeChanged(string args)
+    {
+        Exchange = args;
+
+        await ExchangeService.GetExchangeEnvironmentsAsync(async result =>
+        {
+            ExchangeEnvironments = result;
+            await InvokeAsync(StateHasChanged);
+        }, null, Exchange);
+    }
+}

@@ -1,0 +1,95 @@
+﻿@page "/login"
+@using CryptoManager.Net.UI.Authorization
+@using CryptoManager.Net.UI.Dialogs
+@using CryptoManager.Net.UI.Services.Rest
+@using System.Net
+@inject IDialogService DialogService
+@inject AuthStateProvider AuthProvider
+@inject LoginService LoginService
+@inject NavigationManager NavManager
+@attribute [AllowAnonymous]
+@implements IDisposable
+
+<PageTitle>Login | CryptoManager.Net</PageTitle>
+
+<MudPaper Style="padding: 20px;" MaxWidth="500px">
+    <MudTextField @onkeyup="@(CheckEnter)" HelperText="email" @bind-Value="Email" />
+    <MudTextField @onkeyup="@(CheckEnter)" HelperText="password" InputType="InputType.Password" @bind-Value="Password" />
+
+    <MudStack AlignItems="AlignItems.End" Style="margin-top: 20px;" Row="true">
+        @if (Error != null)
+        {
+            <MudText Color="Color.Error" Style="line-height: 36px">@Error</MudText>
+        }
+        <MudSpacer />
+        <MudButton OnClick="Login" ButtonType="ButtonType.Submit"  Color="Color.Success">Login</MudButton>
+    </MudStack>
+</MudPaper>
+
+@code {
+    public string Email { get; set; } = string.Empty;
+    public string Password { get; set; } = string.Empty;
+
+    public string? Error { get; set; }
+
+    private string _forward = "/";
+
+    protected override void OnInitialized()
+    {
+        var paramSplit = NavManager.Uri.Split("?");
+        if (paramSplit.Length == 2)
+        {
+            var paramPairs = paramSplit[1].Split("&");
+            var redirect = paramPairs.SingleOrDefault(x => x.Contains("redirect="));
+            if (redirect != null)
+                _forward = WebUtility.UrlDecode(redirect.Split("=")[1]);
+        }
+
+        if (AuthProvider.User != null)
+            NavManager.NavigateTo(_forward);
+
+        AuthProvider.AuthenticationStateChanged += CheckStateChange;
+    }
+
+    private async void CheckStateChange(Task<AuthenticationState> stateTask)
+    {
+        var state = await stateTask;
+        if (state.User != null)
+            NavManager.NavigateTo(_forward);
+    }
+
+    private async Task CheckEnter(KeyboardEventArgs e)
+    {
+        if (e.Code == "Enter" || e.Code == "NumpadEnter")
+            await Login();
+    }
+
+    private async Task Login()
+    {
+        Error = null;
+
+        var loadingDialog = await DialogService.ShowAsync<LoadingDialog>(null, options: new DialogOptions
+        {
+            BackdropClick = false,
+            CloseOnEscapeKey = false
+        });
+
+        var result = await LoginService.LoginAsync(Email, Password);
+        loadingDialog.Close();
+        if (!result.Success)
+        {
+            if (result.Errors.First().Code == "-10004") // Incorrect credentials
+                Error = "Invalid credentials";
+            else
+                Error = "Login failed";
+
+        }
+        else
+            NavManager.NavigateTo(_forward);
+    }
+
+    public void Dispose()
+    {
+        AuthProvider.AuthenticationStateChanged -= CheckStateChange;
+    }
+}

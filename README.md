@@ -13,9 +13,9 @@ Demo application for using the open source, free to use CryptoExchange.Net and C
 * Order management for all symbols and exchanges
 * QuickView allowing tracking of live data up of up to 8 different symbols simultaneously 
 
-## 
+### Warning
 The main purpose of the application is to demo the possibilities of the used libraries.  
-You're free to use the application but no responsibility is assumed for losses due to bugs or any other reason.
+You're free to use the hosted version as is, but adding API keys for the live environment with trading permissions is at your own risk and no responsibility is assumed for losses due to bugs or any other reason.
 
 ##
 <center><i>Dashboard</i></center>  

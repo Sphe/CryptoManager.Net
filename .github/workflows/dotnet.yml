@@ -21,8 +21,8 @@ jobs:
       with:
         dotnet-version: 9.0.x
     - name: Restore dependencies
-      run: dotnet restore CryptoManager.Net.sln
+      run: dotnet restore CryptoManager.Net.Server.sln
     - name: Build
-      run: dotnet build CryptoManager.Net.sln --no-restore 
+      run: dotnet build CryptoManager.Net.Server.sln --no-restore 
     - name: Test
-      run: dotnet test CryptoManager.Net.sln --no-build --verbosity normal
+      run: dotnet test CryptoManager.Net.Server.sln --no-build --verbosity normal

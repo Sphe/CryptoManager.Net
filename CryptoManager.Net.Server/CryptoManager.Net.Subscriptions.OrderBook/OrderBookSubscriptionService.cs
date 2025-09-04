@@ -21,7 +21,7 @@ namespace CryptoManager.Net.Subscriptions.OrderBook
         // TopicKey => UpdateSubscriptions
         private ConcurrentDictionary<string, OrderBookUpdateSubscription> _updateSubscriptions = new ConcurrentDictionary<string, OrderBookUpdateSubscription>();
 
-        public int ConnectionCount => _connectionSubscriptions.Count;
+        public int ConnectionCount => _connectionSubscriptions.Count(x => x.Value.Count > 0);
         public int SubscriptionCount => _connectionSubscriptions.Sum(x => x.Value.Count);
 
         public OrderBookSubscriptionService(
@@ -166,6 +166,8 @@ namespace CryptoManager.Net.Subscriptions.OrderBook
 
             foreach (var sub in subscriptions)
                 await UnsubscribeAsync(connectionId, sub.Value.SymbolId);
+
+            _connectionSubscriptions.TryRemove(connectionId, out _);
         }
     }
 }

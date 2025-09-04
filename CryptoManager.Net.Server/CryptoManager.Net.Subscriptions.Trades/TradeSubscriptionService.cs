@@ -19,7 +19,7 @@ namespace CryptoManager.Net.Subscriptions.Trades
         // TopicKey => UpdateSubscriptions
         private ConcurrentDictionary<string, TradeUpdateSubscription> _updateSubscriptions = new ConcurrentDictionary<string, TradeUpdateSubscription>();
 
-        public int ConnectionCount => _connectionSubscriptions.Count;
+        public int ConnectionCount => _connectionSubscriptions.Count(x => x.Value.Count > 0);
         public int SubscriptionCount => _connectionSubscriptions.Sum(x => x.Value.Count);
 
         public TradeSubscriptionService(
@@ -150,6 +150,8 @@ namespace CryptoManager.Net.Subscriptions.Trades
 
             foreach(var sub in subscriptions)
                 await UnsubscribeAsync(connectionId, sub.Value.SymbolId);
+
+            _connectionSubscriptions.TryRemove(connectionId, out _);
         }
     }
 }

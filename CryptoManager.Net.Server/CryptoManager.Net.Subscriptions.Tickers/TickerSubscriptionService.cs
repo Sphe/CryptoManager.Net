@@ -19,7 +19,7 @@ namespace CryptoManager.Net.Subscriptions.Tickers
         // TopicKey => UpdateSubscriptions
         private ConcurrentDictionary<string, TickerUpdateSubscription> _updateSubscriptions = new ConcurrentDictionary<string, TickerUpdateSubscription>();
 
-        public int ConnectionCount => _connectionSubscriptions.Count;
+        public int ConnectionCount => _connectionSubscriptions.Count(x => x.Value.Count > 0);
         public int SubscriptionCount => _connectionSubscriptions.Sum(x => x.Value.Count);
 
         public TickerSubscriptionService(
@@ -135,6 +135,7 @@ namespace CryptoManager.Net.Subscriptions.Tickers
 
                 await updateSubscription.UpdateSubscription.CloseAsync();
                 _updateSubscriptions.Remove(symbolId, out _);
+
                 _logger.LogInformation("Ticker subscription for {Symbol} closed, now {TotalSubs} Ticker subscriptions for {DiffSubs} different symbols", symbolId, _connectionSubscriptions.Sum(x => x.Value.Count), _updateSubscriptions.Count);
             }
             finally
@@ -150,6 +151,8 @@ namespace CryptoManager.Net.Subscriptions.Tickers
 
             foreach (var sub in subscriptions)
                 await UnsubscribeAsync(connectionId, sub.Value.SymbolId);
+
+            _connectionSubscriptions.TryRemove(connectionId, out _);
         }
     }
 }

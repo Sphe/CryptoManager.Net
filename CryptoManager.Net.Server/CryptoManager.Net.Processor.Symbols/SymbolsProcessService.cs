@@ -2,10 +2,9 @@
 using CryptoManager.Net.Database.Models;
 using CryptoManager.Net.Models;
 using CryptoManager.Net.Publish;
-using EFCore.BulkExtensions;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using MongoDB.Driver;
 
 namespace CryptoManager.Net.Processor.Symbols
 {
@@ -17,17 +16,17 @@ namespace CryptoManager.Net.Processor.Symbols
         private string[] _fiatAssets;
         private string[] _leveragedTokens;
         private readonly IProcessInput<Symbol> _processInput;
-        private readonly IDbContextFactory<TrackerContext> _dbContextFactory;
+        private readonly IMongoDatabaseFactory _mongoDatabaseFactory;
 
         public SymbolsProcessService(
             IConfiguration configuration,
             ILogger<SymbolsProcessService> logger,
             IProcessInput<Symbol> publishOutput,
-            IDbContextFactory<TrackerContext> dbContextFactory)
+            IMongoDatabaseFactory mongoDatabaseFactory)
         {
             _logger = logger;
             _processInput = publishOutput;
-            _dbContextFactory = dbContextFactory;
+            _mongoDatabaseFactory = mongoDatabaseFactory;
 
             _usdStableAssets = configuration.GetValue<string>("UsdStableAssets")!.Split(";");
             _fiatAssets = configuration.GetValue<string>("FiatAssets")!.Split(";");
@@ -51,10 +50,14 @@ namespace CryptoManager.Net.Processor.Symbols
 
         private async Task ProcessAsync(PublishItem<Symbol> update)
         {
-            var context = _dbContextFactory.CreateDbContext();
+            var context = _mongoDatabaseFactory.CreateContext();
 
             // Get the names of all symbols for the exchange currently in the DB so we know which ones are no longer returned
-            var exchangeSymbols = await context.Symbols.Where(x => x.Exchange == update.Exchange).Select(x => x.Id).ToHashSetAsync();
+            var exchangeSymbols = await context.ExchangeSymbols
+                .Find(x => x.Exchange == update.Exchange)
+                .Project(x => x.Id)
+                .ToListAsync();
+            var exchangeSymbolsSet = exchangeSymbols.ToHashSet();
 
             var symbols = new List<ExchangeSymbol>();
             foreach (var item in update.Data)
@@ -84,12 +87,12 @@ namespace CryptoManager.Net.Processor.Symbols
                 };
 
                 symbols.Add(symbol);
-                exchangeSymbols.Remove(id);
+                exchangeSymbolsSet.Remove(id);
             }
 
             // Any symbols no longer returned should be set to deleted in DB
             var symbolsToRemove = new List<ExchangeSymbol>();
-            foreach (var item in exchangeSymbols)
+            foreach (var item in exchangeSymbolsSet)
             {
                 symbolsToRemove.Add(new ExchangeSymbol
                 {
@@ -109,30 +112,34 @@ namespace CryptoManager.Net.Processor.Symbols
 
             try
             {
-                await context.BulkInsertOrUpdateAsync(symbols, new BulkConfig
+                var bulkOps = new List<WriteModel<ExchangeSymbol>>();
+                foreach (var symbol in symbols)
                 {
-                    PropertiesToInclude = [
-                        nameof(ExchangeSymbol.Id),
-                        nameof(ExchangeSymbol.Exchange),
-                        nameof(ExchangeSymbol.Name),
-                        nameof(ExchangeSymbol.BaseAsset),
-                        nameof(ExchangeSymbol.BaseAssetExchangeId),
-                        nameof(ExchangeSymbol.QuoteAsset),
-                        nameof(ExchangeSymbol.QuoteAssetExchangeId),
-                        nameof(ExchangeSymbol.MinNotionalValue),
-                        nameof(ExchangeSymbol.MinTradeQuantity),
-                        nameof(ExchangeSymbol.PriceDecimals),
-                        nameof(ExchangeSymbol.PriceSignificantFigures),
-                        nameof(ExchangeSymbol.QuantityDecimals),
-                        nameof(ExchangeSymbol.QuantityStep),
-                        nameof(ExchangeSymbol.BaseAssetType),
-                        nameof(ExchangeSymbol.QuoteAssetType),
-                        nameof(ExchangeSymbol.Enabled),
-                        nameof(ExchangeSymbol.UpdateTime),
-                        nameof(ExchangeSymbol.DeleteTime)
-                    ],
-                    WithHoldlock = false
-                });
+                    var filter = Builders<ExchangeSymbol>.Filter.Eq(x => x.Id, symbol.Id);
+                    var updateDefinition = Builders<ExchangeSymbol>.Update
+                        .Set(x => x.Exchange, symbol.Exchange)
+                        .Set(x => x.Name, symbol.Name)
+                        .Set(x => x.BaseAsset, symbol.BaseAsset)
+                        .Set(x => x.BaseAssetExchangeId, symbol.BaseAssetExchangeId)
+                        .Set(x => x.QuoteAsset, symbol.QuoteAsset)
+                        .Set(x => x.QuoteAssetExchangeId, symbol.QuoteAssetExchangeId)
+                        .Set(x => x.MinNotionalValue, symbol.MinNotionalValue)
+                        .Set(x => x.MinTradeQuantity, symbol.MinTradeQuantity)
+                        .Set(x => x.PriceDecimals, symbol.PriceDecimals)
+                        .Set(x => x.PriceSignificantFigures, symbol.PriceSignificantFigures)
+                        .Set(x => x.QuantityDecimals, symbol.QuantityDecimals)
+                        .Set(x => x.QuantityStep, symbol.QuantityStep)
+                        .Set(x => x.BaseAssetType, symbol.BaseAssetType)
+                        .Set(x => x.QuoteAssetType, symbol.QuoteAssetType)
+                        .Set(x => x.Enabled, symbol.Enabled)
+                        .Set(x => x.UpdateTime, symbol.UpdateTime)
+                        .Set(x => x.DeleteTime, symbol.DeleteTime);
+
+                    bulkOps.Add(new UpdateOneModel<ExchangeSymbol>(filter, updateDefinition) { IsUpsert = true });
+                }
+
+                if (bulkOps.Any())
+                    await context.ExchangeSymbols.BulkWriteAsync(bulkOps);
             }
             catch(Exception ex)
             {
@@ -141,23 +148,27 @@ namespace CryptoManager.Net.Processor.Symbols
 
             try
             {
-                await context.BulkInsertOrUpdateAsync(symbolsToRemove, new BulkConfig
+                var bulkOpsRemove = new List<WriteModel<ExchangeSymbol>>();
+                foreach (var symbol in symbolsToRemove)
                 {
-                    PropertiesToInclude = [
-                        nameof(ExchangeSymbol.Id),
-                        nameof(ExchangeSymbol.Exchange),
-                        nameof(ExchangeSymbol.LastPrice),
-                        nameof(ExchangeSymbol.HighPrice),
-                        nameof(ExchangeSymbol.LowPrice),
-                        nameof(ExchangeSymbol.Volume),
-                        nameof(ExchangeSymbol.QuoteVolume),
-                        nameof(ExchangeSymbol.ChangePercentage),
-                        nameof(ExchangeSymbol.Enabled),
-                        nameof(ExchangeSymbol.UpdateTime),
-                        nameof(ExchangeSymbol.DeleteTime)
-                    ],
-                    WithHoldlock = false
-                });
+                    var filter = Builders<ExchangeSymbol>.Filter.Eq(x => x.Id, symbol.Id);
+                    var updateDefinition = Builders<ExchangeSymbol>.Update
+                        .Set(x => x.Exchange, symbol.Exchange)
+                        .Set(x => x.LastPrice, symbol.LastPrice)
+                        .Set(x => x.HighPrice, symbol.HighPrice)
+                        .Set(x => x.LowPrice, symbol.LowPrice)
+                        .Set(x => x.Volume, symbol.Volume)
+                        .Set(x => x.QuoteVolume, symbol.QuoteVolume)
+                        .Set(x => x.ChangePercentage, symbol.ChangePercentage)
+                        .Set(x => x.Enabled, symbol.Enabled)
+                        .Set(x => x.UpdateTime, symbol.UpdateTime)
+                        .Set(x => x.DeleteTime, symbol.DeleteTime);
+
+                    bulkOpsRemove.Add(new UpdateOneModel<ExchangeSymbol>(filter, updateDefinition) { IsUpsert = true });
+                }
+
+                if (bulkOpsRemove.Any())
+                    await context.ExchangeSymbols.BulkWriteAsync(bulkOpsRemove);
             }
             catch (Exception ex)
             {
@@ -178,5 +189,6 @@ namespace CryptoManager.Net.Processor.Symbols
 
             return AssetType.Crypto;
         }
+
     }
 }

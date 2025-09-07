@@ -397,3 +397,6 @@ FodyWeavers.xsd
 *.sln.iml
 
 .env
+
+# Configuration files with sensitive data
+appsettings.json

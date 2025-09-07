@@ -1,32 +1,67 @@
 ﻿using CryptoExchange.Net.SharedApis;
-using Microsoft.EntityFrameworkCore;
+using MongoDB.Bson;
+using MongoDB.Bson.Serialization.Attributes;
 
 namespace CryptoManager.Net.Database.Models
 {
     public class UserOrder
     {
+        [BsonId]
+        [BsonRepresentation(BsonType.ObjectId)]
         public string Id { get; set; } = string.Empty;
+        
+        [BsonElement("exchange")]
         public string Exchange { get; set; } = string.Empty;
+        
+        [BsonElement("symbolId")]
         public string SymbolId { get; set; } = string.Empty;
+        
+        [BsonElement("orderId")]
         public string OrderId { get; set; } = string.Empty;
+        
+        [BsonElement("orderSide")]
         public SharedOrderSide OrderSide { get; set; }
+        
+        [BsonElement("orderType")]
         public SharedOrderType OrderType { get; set; }
+        
+        [BsonElement("status")]
         public SharedOrderStatus Status { get; set; }
-        [Precision(28, 8)]
+        
+        [BsonElement("orderPrice")]
+        [BsonRepresentation(BsonType.Decimal128)]
         public decimal? OrderPrice { get; set; }
-        [Precision(28, 8)]
+        
+        [BsonElement("orderQuantityBase")]
+        [BsonRepresentation(BsonType.Decimal128)]
         public decimal? OrderQuantityBase { get; set; }
-        [Precision(28, 8)]
+        
+        [BsonElement("orderQuantityQuote")]
+        [BsonRepresentation(BsonType.Decimal128)]
         public decimal? OrderQuantityQuote { get; set; }
-        [Precision(28, 8)]
+        
+        [BsonElement("quantityFilledBase")]
+        [BsonRepresentation(BsonType.Decimal128)]
         public decimal? QuantityFilledBase { get; set; }
-        [Precision(28, 8)]
+        
+        [BsonElement("quantityFilledQuote")]
+        [BsonRepresentation(BsonType.Decimal128)]
         public decimal? QuantityFilledQuote { get; set; }
-        [Precision(28, 8)]
+        
+        [BsonElement("averagePrice")]
+        [BsonRepresentation(BsonType.Decimal128)]
         public decimal? AveragePrice { get; set; }
+        
+        [BsonElement("createTime")]
         public DateTime CreateTime { get; set; }        
+        
+        [BsonElement("updateTime")]
         public DateTime UpdateTime { get; set; }
-        public int UserId { get; set; }
-        public virtual User User { get; set; } = default!;
+        
+        [BsonElement("userId")]
+        public string UserId { get; set; } = string.Empty;
+        
+        [BsonIgnore]
+        public User User { get; set; } = default!;
     }
 }

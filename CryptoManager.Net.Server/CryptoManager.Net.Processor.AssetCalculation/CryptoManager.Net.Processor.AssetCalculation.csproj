@@ -7,9 +7,14 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="MongoDB.Driver" Version="3.4.3" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\CryptoManager.Net.Database\CryptoManager.Net.Database.csproj" />
     <ProjectReference Include="..\CryptoManager.Net.Models\CryptoManager.Net.Models.csproj" />
     <ProjectReference Include="..\CryptoManager.Net.Publish\CryptoManager.Net.Data.csproj" />
+    <ProjectReference Include="..\CryptoManager.Net.Services.External\CryptoManager.Net.Services.External.csproj" />
   </ItemGroup>
 
 </Project>

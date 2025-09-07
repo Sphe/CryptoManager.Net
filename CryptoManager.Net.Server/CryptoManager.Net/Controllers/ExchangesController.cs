@@ -8,7 +8,8 @@ using CryptoManager.Net.Models.Requests;
 using CryptoManager.Net.Models.Response;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
+using MongoDB.Driver;
+using MongoDB.Bson;
 using System.Linq.Expressions;
 
 namespace CryptoManager.Net.Controllers;
@@ -22,7 +23,7 @@ public class ExchangesController : ApiController
     private readonly ILogger _logger;
     private readonly string[]? _enabledExchanges;
 
-    public ExchangesController(ILogger<ExchangesController> logger, IConfiguration configuration, TrackerContext dbContext) : base(dbContext)
+    public ExchangesController(ILogger<ExchangesController> logger, IConfiguration configuration, MongoTrackerContext dbContext) : base(dbContext)
     {
         _logger = logger;
         _enabledExchanges = configuration.GetValue<string?>("EnabledExchanges")?.Split(";");
@@ -55,66 +56,95 @@ public class ExchangesController : ApiController
         int page = 1,
         int pageSize = 20)
     {
-        IQueryable<IGrouping<string, ExchangeSymbol>> dbQuery = _dbContext.Symbols.GroupBy(x => x.Exchange);
+        // Build MongoDB aggregation pipeline
+        var pipeline = new List<BsonDocument>();
+
+        // Match stage - filter by enabled exchanges
         if (_enabledExchanges != null)
-            dbQuery = dbQuery.Where(x => _enabledExchanges.Contains(x.Key));
+        {
+            pipeline.Add(new BsonDocument("$match", new BsonDocument("Exchange", new BsonDocument("$in", new BsonArray(_enabledExchanges)))));
+        }
 
+        // Group by Exchange
+        var groupStage = new BsonDocument("$group", new BsonDocument
+        {
+            { "_id", "$Exchange" },
+            { "Exchange", new BsonDocument("$first", "$Exchange") },
+            { "Symbols", new BsonDocument("$sum", new BsonDocument("$cond", new BsonArray { "$Enabled", 1, 0 })) },
+            { "UsdVolume", new BsonDocument("$sum", new BsonDocument("$ifNull", new BsonArray { "$UsdVolume", 0 })) }
+        });
+        pipeline.Add(groupStage);
+
+        // Filter by query if provided
         if (!string.IsNullOrEmpty(query))
-            dbQuery = dbQuery.Where(x => x.Key.Contains(query));
+        {
+            pipeline.Add(new BsonDocument("$match", new BsonDocument("Exchange", new BsonDocument("$regex", new BsonRegularExpression(query, "i")))));
+        }
 
+        // Sort stage
         if (string.IsNullOrEmpty(orderBy))
             orderBy = nameof(ExchangeSymbol.UsdVolume);
 
-        var projection = dbQuery.Select(x => new ExchangeProjection
+        var sortDirection = orderDirection == OrderDirection.Ascending ? 1 : -1;
+        var sortField = orderBy switch
         {
-            Exchange = x.Key,
-            Symbols = x.Where(x => x.Enabled == true).Count(),
-            UsdVolume = x.Sum(x => x.UsdVolume ?? 0)
+            nameof(ApiExchange.UsdVolume) => "UsdVolume",
+            nameof(ApiExchange.Symbols) => "Symbols",
+            _ => "UsdVolume"
+        };
+        pipeline.Add(new BsonDocument("$sort", new BsonDocument(sortField, sortDirection)));
+
+        // Count total documents
+        var countPipeline = pipeline.ToList();
+        countPipeline.Add(new BsonDocument("$count", "total"));
+        var totalResult = await _dbContext.Symbols.Aggregate<BsonDocument>(countPipeline).FirstOrDefaultAsync();
+        var total = totalResult?["total"]?.AsInt32 ?? 0;
+
+        // Add pagination
+        pipeline.Add(new BsonDocument("$skip", (page - 1) * pageSize));
+        pipeline.Add(new BsonDocument("$limit", pageSize));
+
+        // Execute aggregation
+        var result = await _dbContext.Symbols.Aggregate<BsonDocument>(pipeline).ToListAsync();
+
+        var exchanges = result.Select(x => new ApiExchange
+        {
+            Exchange = x["Exchange"].AsString,
+            UsdVolume = x["UsdVolume"].AsDecimal,
+            Symbols = x["Symbols"].AsInt32
         });
 
-        Expression<Func<ExchangeProjection, decimal?>> order = orderBy switch
-        {
-            nameof(ApiExchange.UsdVolume) => exchange => exchange.UsdVolume,
-            nameof(ApiExchange.Symbols) => exchange => exchange.Symbols,
-            _ => throw new ArgumentException(),
-        };
-
-        projection = orderDirection == OrderDirection.Ascending
-            ? projection.OrderBy(order)
-            : projection.OrderByDescending(order);
-
-        var total = await projection.CountAsync();
-        var result = await projection.Skip((page - 1) * pageSize).Take(pageSize).ToListAsync();
-
-        return ApiResultPaged<IEnumerable<ApiExchange>>.Ok(page, pageSize, total, result.Select(x => new ApiExchange
-        {
-            Exchange = x.Exchange,
-            UsdVolume = x.UsdVolume,
-            Symbols = x.Symbols
-        }));
+        return ApiResultPaged<IEnumerable<ApiExchange>>.Ok(page, pageSize, total, exchanges);
     }
 
     [HttpGet("{exchange}")]
     [ServerCache(Duration = 10)]
     public async Task<ApiResult<ApiExchangeDetails>> GetExchangeDetailsAsync(string exchange)
     {
-        IQueryable<IGrouping<string, ExchangeSymbol>> dbQuery = _dbContext.Symbols.Where(x => x.Exchange == exchange).GroupBy(x => x.Exchange);
-        var stats = await dbQuery.Select(x => new ExchangeProjection
+        // Build MongoDB aggregation pipeline for specific exchange
+        var pipeline = new List<BsonDocument>
         {
-            Exchange = x.Key,
-            Symbols = x.Where(x => x.Enabled == true).Count(),
-            UsdVolume = x.Sum(x => x.UsdVolume ?? 0)
-        }).SingleOrDefaultAsync();
+            new BsonDocument("$match", new BsonDocument("Exchange", exchange)),
+            new BsonDocument("$group", new BsonDocument
+            {
+                { "_id", "$Exchange" },
+                { "Exchange", new BsonDocument("$first", "$Exchange") },
+                { "Symbols", new BsonDocument("$sum", new BsonDocument("$cond", new BsonArray { "$Enabled", 1, 0 })) },
+                { "UsdVolume", new BsonDocument("$sum", new BsonDocument("$ifNull", new BsonArray { "$UsdVolume", 0 })) }
+            })
+        };
 
-        if (stats == null)
+        var result = await _dbContext.Symbols.Aggregate<BsonDocument>(pipeline).FirstOrDefaultAsync();
+
+        if (result == null)
             return ApiResult<ApiExchangeDetails>.Error(ErrorType.Unknown, null, "Exchange not found");
 
         var exchangeInfo = Exchanges.All.Single(x => x.Name == exchange);
         return ApiResult<ApiExchangeDetails>.Ok(new ApiExchangeDetails
         {
             Exchange = exchange,
-            Symbols = stats.Symbols,
-            UsdVolume = stats.UsdVolume,
+            Symbols = result["Symbols"].AsInt32,
+            UsdVolume = result["UsdVolume"].AsDecimal,
             LogoUrl = exchangeInfo.ImageUrl,
             Type = exchangeInfo.Type,
             Url = exchangeInfo.Url

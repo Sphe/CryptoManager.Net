@@ -5,7 +5,8 @@ using CryptoManager.Net.Models.Requests;
 using CryptoManager.Net.Models.Response;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
+using MongoDB.Driver;
+using MongoDB.Bson;
 using System.Linq.Expressions;
 
 namespace CryptoManager.Net.Controllers;
@@ -20,7 +21,7 @@ public class AssetsController : ApiController
     public AssetsController(
         ILogger<AssetsController> logger, 
         IConfiguration configuration,
-        TrackerContext dbContext) : base(dbContext)
+        MongoTrackerContext dbContext) : base(dbContext)
     {
         _logger = logger;
         _enabledExchanges = configuration.GetValue<string?>("EnabledExchanges")?.Split(";");
@@ -39,58 +40,82 @@ public class AssetsController : ApiController
         int page = 1,
         int pageSize = 20)
     {
-        IQueryable<AssetStats> preGroupQuery = _dbContext.AssetStats;
+        // Build MongoDB aggregation pipeline
+        var pipeline = new List<BsonDocument>();
+
+        // Match stage - filter by enabled exchanges, exchange, and asset type
+        var matchFilters = new List<BsonElement>();
+        
         if (_enabledExchanges != null)
-            preGroupQuery = preGroupQuery.Where(x => _enabledExchanges.Contains(x.Exchange));
-
+            matchFilters.Add(new BsonElement("Exchange", new BsonDocument("$in", new BsonArray(_enabledExchanges))));
+        
         if (!string.IsNullOrEmpty(exchange))
-            preGroupQuery = preGroupQuery.Where(x => x.Exchange == exchange);
-
+            matchFilters.Add(new BsonElement("Exchange", exchange));
+        
         if (assetType != null)
-            preGroupQuery = preGroupQuery.Where(x => x.AssetType == assetType.Value);
+            matchFilters.Add(new BsonElement("AssetType", (int)assetType.Value));
 
-        var dbQuery = preGroupQuery.GroupBy(x => x.Asset);
+        if (matchFilters.Any())
+            pipeline.Add(new BsonDocument("$match", new BsonDocument(matchFilters)));
+
+        // Group by Asset
+        var groupStage = new BsonDocument("$group", new BsonDocument
+        {
+            { "_id", "$Asset" },
+            { "Name", new BsonDocument("$first", "$Asset") },
+            { "AssetType", new BsonDocument("$first", "$AssetType") },
+            { "Value", new BsonDocument("$avg", "$Value") },
+            { "Volume", new BsonDocument("$sum", "$Volume") },
+            { "VolumeUsd", new BsonDocument("$sum", new BsonDocument("$multiply", new BsonArray { "$Volume", "$Value" })) },
+            { "ChangePercentage", new BsonDocument("$avg", "$ChangePercentage") }
+        });
+        pipeline.Add(groupStage);
+
+        // Filter by query if provided
         if (!string.IsNullOrEmpty(query))
-            dbQuery = dbQuery.Where(x => x.Key.Contains(query));
+            pipeline.Add(new BsonDocument("$match", new BsonDocument("Name", new BsonDocument("$regex", new BsonRegularExpression(query, "i")))));
 
+        // Filter by minimum USD volume
+        if (minUsdVolume > 0)
+            pipeline.Add(new BsonDocument("$match", new BsonDocument("VolumeUsd", new BsonDocument("$gt", minUsdVolume))));
+
+        // Sort stage
         if (string.IsNullOrEmpty(orderBy))
             orderBy = nameof(ApiAsset.VolumeUsd);
 
-        Expression<Func<IGrouping<string, AssetStats>, decimal?>> order = orderBy switch
+        var sortDirection = orderDirection == OrderDirection.Ascending ? 1 : -1;
+        var sortField = orderBy switch
         {
-            nameof(ApiAsset.Volume) => asset => asset.Sum(x => x.Volume),
-            nameof(ApiAsset.VolumeUsd) => asset => asset.Sum(x => x.Volume * x.Value),
-            nameof(ApiAsset.ChangePercentage) => asset => asset.Average(x => x.ChangePercentage),
-            _ => throw new ArgumentException(),
+            nameof(ApiAsset.Volume) => "Volume",
+            nameof(ApiAsset.VolumeUsd) => "VolumeUsd", 
+            nameof(ApiAsset.ChangePercentage) => "ChangePercentage",
+            _ => "VolumeUsd"
         };
-        
-        dbQuery = orderDirection == OrderDirection.Ascending
-            ? dbQuery.OrderBy(order)
-            : dbQuery.OrderByDescending(order);
+        pipeline.Add(new BsonDocument("$sort", new BsonDocument(sortField, sortDirection)));
 
-        var selectQuery = dbQuery.Select(x => new
+        // Count total documents
+        var countPipeline = pipeline.ToList();
+        countPipeline.Add(new BsonDocument("$count", "total"));
+        var totalResult = await _dbContext.AssetStats.Aggregate<BsonDocument>(countPipeline).FirstOrDefaultAsync();
+        var total = totalResult?["total"]?.AsInt32 ?? 0;
+
+        // Add pagination
+        pipeline.Add(new BsonDocument("$skip", (page - 1) * pageSize));
+        pipeline.Add(new BsonDocument("$limit", pageSize));
+
+        // Execute aggregation
+        var result = await _dbContext.AssetStats.Aggregate<BsonDocument>(pipeline).ToListAsync();
+
+        var assets = result.Select(x => new ApiAsset
         {
-            Name = x.Key,
-            AssetType = x.First().AssetType,
-            Value = x.Average(x => x.Value),
-            Volume = x.Sum(x => x.Volume),
-            VolumeUsd = x.Sum(x => x.Volume * x.Value),
-            ChangePercentage = x.Average(x => x.ChangePercentage),
-        }).Where(x => x.VolumeUsd > minUsdVolume);
+            Name = x["Name"].AsString,
+            AssetType = (AssetType)x["AssetType"].AsInt32,
+            Value = (decimal?)x["Value"].AsDecimal,
+            Volume = x["Volume"].AsDecimal,
+            VolumeUsd = x["VolumeUsd"].AsDecimal,
+            ChangePercentage = (decimal?)x["ChangePercentage"].AsDecimal
+        });
 
-        var total = await selectQuery.CountAsync();
-        var result = await selectQuery.Skip((page - 1) * pageSize).Take(pageSize).AsNoTracking().ToListAsync();
-
-        var pageResult = ApiResultPaged<IEnumerable<ApiAsset>>.Ok(page, pageSize, total, result.Select(x => new ApiAsset
-        {
-            Name = x.Name,
-            AssetType = x.AssetType,
-            Value = x.Value,
-            Volume = x.Volume,
-            VolumeUsd = x.Value * x.Volume,
-            ChangePercentage = x.ChangePercentage
-        }));
-
-        return pageResult;
+        return ApiResultPaged<IEnumerable<ApiAsset>>.Ok(page, pageSize, total, assets);
     }
 }

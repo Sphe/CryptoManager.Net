@@ -7,9 +7,9 @@ using CryptoManager.Net.Database;
 using CryptoManager.Net.Database.Models;
 using CryptoManager.Net.Models.Requests;
 using CryptoManager.Net.Models.Response;
-using EFCore.BulkExtensions;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
+using MongoDB.Driver;
+using MongoDB.Bson;
 using System.Linq.Expressions;
 
 namespace CryptoManager.Net.Controllers
@@ -20,7 +20,7 @@ namespace CryptoManager.Net.Controllers
         private readonly ILogger _logger;
         private readonly IExchangeUserClientProvider _clientProvider;
 
-        public TradesController(ILogger<TradesController> logger, IExchangeUserClientProvider clientProvider, TrackerContext dbContext)
+        public TradesController(ILogger<TradesController> logger, IExchangeUserClientProvider clientProvider, MongoTrackerContext dbContext)
             : base(dbContext)
         {
             _logger = logger;
@@ -38,30 +38,29 @@ namespace CryptoManager.Net.Controllers
             int page = 1, 
             int pageSize = 20)
         {
-            var dbQuery = _dbContext.UserTrades.Where(x => x.UserId == UserId);
+            var filterBuilder = Builders<UserTrade>.Filter;
+            var filter = filterBuilder.Eq(x => x.UserId, UserId);
+            
             if (!string.IsNullOrEmpty(symbolId))
-                dbQuery = dbQuery.Where(x => x.SymbolId == symbolId);
+                filter = filterBuilder.And(filter, filterBuilder.Eq(x => x.SymbolId, symbolId));
 
             if (!string.IsNullOrEmpty(orderId))
-                dbQuery = dbQuery.Where(x => x.OrderId == orderId);
+                filter = filterBuilder.And(filter, filterBuilder.Eq(x => x.OrderId, orderId));
 
             if (string.IsNullOrEmpty(orderBy))
                 orderBy = nameof(ApiOrder.CreateTime);
 
-            Expression<Func<UserTrade, object?>> order = orderBy switch
+            var sortBuilder = Builders<UserTrade>.Sort;
+            var sort = orderBy switch
             {
-                nameof(UserTrade.CreateTime) => trade => trade.CreateTime,
+                nameof(UserTrade.CreateTime) => orderDirection == OrderDirection.Ascending ? sortBuilder.Ascending(x => x.CreateTime) : sortBuilder.Descending(x => x.CreateTime),
                 _ => throw new ArgumentException(),
             };
 
-            dbQuery = orderDirection == OrderDirection.Ascending
-                ? dbQuery.OrderBy(order)
-                : dbQuery.OrderByDescending(order);
+            var total = await _dbContext.UserTrades.CountDocumentsAsync(filter);
+            var pageData = await _dbContext.UserTrades.Find(filter).Sort(sort).Skip((page - 1) * pageSize).Limit(pageSize).ToListAsync();
 
-            var total = await dbQuery.CountAsync();
-            var pageData = await dbQuery.Skip((page - 1) * pageSize).Take(pageSize).AsNoTracking().ToListAsync();
-
-            return ApiResultPaged<IEnumerable<ApiUserTrade>>.Ok(page, pageSize, total, pageData.Select(x => new ApiUserTrade
+            return ApiResultPaged<IEnumerable<ApiUserTrade>>.Ok(page, pageSize, (int)total, pageData.Select(x => new ApiUserTrade
             {
                 Exchange = x.Exchange,
                 SymbolId = x.SymbolId,
@@ -83,7 +82,12 @@ namespace CryptoManager.Net.Controllers
                 return ApiResult.Ok();
 
             var symbolData = symbolId.Split("-");
-            var apiKey = await _dbContext.UserApiKeys.Where(x => x.UserId == UserId && !x.Invalid && x.Exchange == symbolData[0]).SingleOrDefaultAsync();
+            var apiKeyFilter = Builders<UserApiKey>.Filter.And(
+                Builders<UserApiKey>.Filter.Eq(x => x.UserId, UserId),
+                Builders<UserApiKey>.Filter.Eq(x => x.Invalid, false),
+                Builders<UserApiKey>.Filter.Eq(x => x.Exchange, symbolData[0])
+            );
+            var apiKey = await _dbContext.UserApiKeys.Find(apiKeyFilter).FirstOrDefaultAsync();
             if (apiKey == null)
                 return ApiResult.Error(ApiErrors.NoApiKeyConfigured);
 
@@ -123,7 +127,7 @@ namespace CryptoManager.Net.Controllers
                 Side = x.Side
             });
 
-            await _dbContext.BulkInsertOrUpdateAsync(dbTrades, new BulkConfig { WithHoldlock = false });
+            await _dbContext.BulkInsertOrUpdateAsync(dbTrades);
             return ApiResult.Ok();
         }
 

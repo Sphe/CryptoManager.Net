@@ -1,11 +1,21 @@
-﻿namespace CryptoManager.Net.Database.Models
+﻿using MongoDB.Bson;
+using MongoDB.Bson.Serialization.Attributes;
+
+namespace CryptoManager.Net.Database.Models
 {
     public class UserQuickViewConfiguration
     {
-        public int Id { get; set; }
+        [BsonId]
+        [BsonRepresentation(BsonType.ObjectId)]
+        public string Id { get; set; } = string.Empty;
+        
+        [BsonElement("symbolId")]
         public string SymbolId { get; set; } = string.Empty;
 
-        public int UserId { get; set; }
+        [BsonElement("userId")]
+        public string UserId { get; set; } = string.Empty;
+        
+        [BsonIgnore]
         public User User { get; set; } = default!;
     }
 }

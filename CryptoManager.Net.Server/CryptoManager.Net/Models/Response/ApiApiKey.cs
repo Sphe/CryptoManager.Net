@@ -2,7 +2,7 @@
 {
     public record ApiApiKey
     {
-        public int Id { get; set; }
+        public string Id { get; set; } = string.Empty;
         public string Exchange { get; set; } = string.Empty;
         public string Environment { get; set; } = string.Empty;
         public string Key { get; set; } = string.Empty;

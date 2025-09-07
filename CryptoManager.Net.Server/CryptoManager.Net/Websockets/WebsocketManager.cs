@@ -1,18 +1,16 @@
 ﻿using CryptoExchange.Net.Objects.Errors;
 using CryptoExchange.Net.SharedApis;
-using CryptoManager.Net.Auth;
 using CryptoManager.Net.Data;
 using CryptoManager.Net.Database;
 using CryptoManager.Net.Database.Models;
+using MongoDB.Driver;
 using CryptoManager.Net.Models.Response;
+using CryptoManager.Net.Subscriptions.KLine;
 using CryptoManager.Net.Subscriptions.OrderBook;
 using CryptoManager.Net.Subscriptions.Tickers;
 using CryptoManager.Net.Subscriptions.Trades;
 using CryptoManager.Net.Subscriptions.User;
-using EFCore.BulkExtensions;
-using Microsoft.EntityFrameworkCore;
 using System.Collections.Concurrent;
-using System.IdentityModel.Tokens.Jwt;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -31,9 +29,9 @@ namespace CryptoManager.Net.Websockets
 
         private Task? _checkDisconnectTask;
 
-        private readonly JwtService _jwtService;
-        private readonly IDbContextFactory<TrackerContext> _dbContextFactory;
+        private readonly IMongoDatabaseFactory _mongoDatabaseFactory;
 
+        private readonly KLineSubscriptionService _klineSubscriptionService;
         private readonly TickerSubscriptionService _tickerSubscriptionService;
         private readonly TradeSubscriptionService _tradeSubscriptionService;
         private readonly OrderBookSubscriptionService _orderBookSubscriptionService;
@@ -47,6 +45,8 @@ namespace CryptoManager.Net.Websockets
 
         public int ConnectionCount => _connections.Count;
         public int UserConnectionCount => _connections.Count;
+        public int KLineConnectionCount => _klineSubscriptionService.ConnectionCount;
+        public int KLineSubscriptionCount => _klineSubscriptionService.SubscriptionCount;
         public int TickerConnectionCount => _tickerSubscriptionService.ConnectionCount;
         public int TickerSubscriptionCount => _tickerSubscriptionService.SubscriptionCount;
         public int TradeConnectionCount => _tradeSubscriptionService.ConnectionCount;
@@ -56,22 +56,21 @@ namespace CryptoManager.Net.Websockets
 
         public WebsocketManager(
             ILogger<WebsocketManager> logger,
-            IDbContextFactory<TrackerContext> dbContextFactory,
-            JwtService jwtService,
+            IMongoDatabaseFactory mongoDatabaseFactory,
+            KLineSubscriptionService klineSubscriptionService,
             TickerSubscriptionService tickerSubscriptionService, 
             TradeSubscriptionService tradeSubscriptionService,
             OrderBookSubscriptionService orderBookSubscriptionService,
             UserSubscriptionService userSubscriptionService)
         {
             _logger = logger;
-            _dbContextFactory = dbContextFactory;
+            _mongoDatabaseFactory = mongoDatabaseFactory;
 
+            _klineSubscriptionService = klineSubscriptionService;
             _tickerSubscriptionService = tickerSubscriptionService;
             _tradeSubscriptionService = tradeSubscriptionService;
             _orderBookSubscriptionService = orderBookSubscriptionService;
             _userSubscriptionService = userSubscriptionService;
-
-            _jwtService = jwtService;
 
             _balanceBatcher = new DataBatcher<UserBalance>(TimeSpan.FromSeconds(1), SaveBalancesAsync);
             _orderBatcher = new DataBatcher<UserOrder>(TimeSpan.FromSeconds(0.5), SaveOrdersAsync, (xOld, xUpdate) =>
@@ -169,11 +168,12 @@ namespace CryptoManager.Net.Websockets
                 connection.TaskCompletionSource.SetResult();
                 _connections.Remove(connection.Id, out _);
 
+                var klineTask = _klineSubscriptionService.UnsubscribeAllAsync(connection.Id);
                 var tickerTask = _tickerSubscriptionService.UnsubscribeAllAsync(connection.Id);
                 var tradeTask = _tradeSubscriptionService.UnsubscribeAllAsync(connection.Id);
                 var bookTask = _orderBookSubscriptionService.UnsubscribeAllAsync(connection.Id);
                 var userTask = connection.UserId == null ? Task.CompletedTask : _userSubscriptionService.UnsubscribeAsync(connection.UserId.Value, connection.Id);
-                await Task.WhenAll(tickerTask, tradeTask, bookTask, userTask);
+                await Task.WhenAll(klineTask, tickerTask, tradeTask, bookTask, userTask);
 
                 _logger.LogInformation("Websocket client disconnected, now {Count} clients", _connections.Count);
             }
@@ -204,29 +204,16 @@ namespace CryptoManager.Net.Websockets
 
             if (message.Action == MessageAction.Authenticate)
             {
-                var jwt = message.Jwt;
-                if (string.IsNullOrEmpty(jwt))
+                var userId = message.UserId;
+                if (string.IsNullOrEmpty(userId))
                 {
-                    _logger.LogDebug("Authentication request denied, JWT not found");
-                    await SendResponseAsync(connection.Connection, message.Id, false, "JWT not provided");
+                    _logger.LogDebug("Authentication request denied, UserId not found");
+                    await SendResponseAsync(connection.Connection, message.Id, false, "UserId not provided");
                     return;
                 }
 
-                JwtSecurityToken token;
-                try
-                {
-                    token = _jwtService.ValidateToken(jwt);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogDebug(ex, "Authentication request denied, JWT invalid");
-                    await SendResponseAsync(connection.Connection, message.Id, false, "JWT validation failed");
-                    return;
-                }
-
-                var userId = int.Parse(token.Claims.First(x => x.Type == "id").Value);
-
-                if (connection.UserId == userId)
+                var userIdInt = Int32.Parse(userId);
+                if (connection.UserId == userIdInt)
                 {
                     // Already authenticated
                     await SendResponseAsync(connection.Connection, message.Id, true);
@@ -240,10 +227,10 @@ namespace CryptoManager.Net.Websockets
                     return;
                 }
 
-                connection.UserId = userId;
+                connection.UserId = userIdInt;
 
-                using var dbContext = _dbContextFactory.CreateDbContext();
-                var apiKeys = await dbContext.UserApiKeys.Where(x => x.UserId == userId && !x.Invalid).ToListAsync();
+                var dbContext = _mongoDatabaseFactory.CreateContext();
+                var apiKeys = await dbContext.UserApiKeys.Find(x => x.UserId == userIdInt.ToString() && !x.Invalid).ToListAsync();
                 var auths = apiKeys.Select(x => new UserExchangeAuthentication {
                     Exchange = x.Exchange,
                     Environment = x.Environment,
@@ -257,7 +244,7 @@ namespace CryptoManager.Net.Websockets
                 {
                     var subResult = await _userSubscriptionService.SubscribeAsync(
                         connection.Id,
-                        userId,
+                        userIdInt,
                         auths,
                         x => ProcessBalanceUpdate(connection, x),
                         x => ProcessOrderUpdate(connection, x),
@@ -266,16 +253,15 @@ namespace CryptoManager.Net.Websockets
                         _cts.Token);
 
                     var invalidKeys = subResult.Where(x => !x.Success && (x.Error!.ErrorType == ErrorType.Unauthorized || x.Error!.ErrorType == ErrorType.InvalidParameter)).Select(x => x.Exchange).ToList();
-                    using var keyContext = _dbContextFactory.CreateDbContext();
-                    var invalidDbKeys = await keyContext.UserApiKeys.Where(x => x.UserId == userId && invalidKeys.Contains(x.Exchange)).ToListAsync();
+                    var keyContext = _mongoDatabaseFactory.CreateContext();
+                    var invalidDbKeys = await keyContext.UserApiKeys.Find(x => x.UserId == userIdInt.ToString() && invalidKeys.Contains(x.Exchange)).ToListAsync();
 
                     foreach (var key in invalidDbKeys)
                     {
-                        _logger.LogDebug("Received unauthorized error for user {UserId} exchange {Exchange}, marking key as invalid", userId, key.Exchange);
+                        _logger.LogDebug("Received unauthorized error for user {UserId} exchange {Exchange}, marking key as invalid", userIdInt, key.Exchange);
                         key.Invalid = true;
+                        await keyContext.UserApiKeys.ReplaceOneAsync(x => x.Id == key.Id, key);
                     }
-
-                    await keyContext.SaveChangesAsync();
 
                     foreach (var result in subResult.Where(x => !x.Success).GroupBy(x => x.Exchange).Select(x => x.First()))               
                         SendStatusUpdate(connection.Connection, "0", SubscriptionStatus.Interrupted, result.Exchange, result.Topic + " - " + result.Error!.Message);
@@ -297,7 +283,13 @@ namespace CryptoManager.Net.Websockets
             if (message.Action == MessageAction.Unsubscribe)
             {
                 // Unsub existing subscription
-                if (message.Topic == SubscriptionTopic.Ticker)
+                if (message.Topic == SubscriptionTopic.KLine)
+                {
+                    // For KLine, we need to extract interval from the message
+                    var interval = message.Interval ?? "1m"; // Default to 1 minute
+                    await _klineSubscriptionService.UnsubscribeAsync(connection.Id, message.SymbolId, interval);
+                }
+                else if (message.Topic == SubscriptionTopic.Ticker)
                 {
                     await _tickerSubscriptionService.UnsubscribeAsync(connection.Id, message.SymbolId);
                 }
@@ -320,7 +312,29 @@ namespace CryptoManager.Net.Websockets
             else if (message.Action == MessageAction.Subscribe)
             {
                 // New subscription
-                if (message.Topic == SubscriptionTopic.Trade)
+                if (message.Topic == SubscriptionTopic.KLine)
+                {
+                    var interval = message.Interval ?? "1m"; // Default to 1 minute
+                    var subResult = await _klineSubscriptionService.SubscribeAsync(connection.Id, message.SymbolId, interval,
+                        update => SendDataUpdate(connection.Connection, message.Id, new ApiKline
+                        {
+                            OpenTime = update.Data.OpenTime,
+                            CloseTime = update.Data.OpenTime.AddMinutes(1), // Estimate close time
+                            OpenPrice = update.Data.OpenPrice,
+                            HighPrice = update.Data.HighPrice,
+                            LowPrice = update.Data.LowPrice,
+                            ClosePrice = update.Data.ClosePrice,
+                            Volume = update.Data.Volume,
+                            QuoteVolume = 0, // Not available in SharedKline
+                            TradeCount = 0, // Not available in SharedKline
+                            TakerBuyBaseVolume = 0, // Not available in SharedKline
+                            TakerBuyQuoteVolume = 0 // Not available in SharedKline
+                        }),
+                        update => SendStatusUpdate(connection.Connection, message.Id, update.Status),
+                        _cts.Token);
+                    await SendResponseAsync(connection.Connection, message.Id, subResult.Success, subResult.Success ? null : subResult.Error!.ToString());
+                }
+                else if (message.Topic == SubscriptionTopic.Trade)
                 {
                     var subResult = await _tradeSubscriptionService.SubscribeAsync(connection.Id, message.SymbolId, update => SendDataUpdate(connection.Connection, message.Id, update.Data.Select(x => new ApiTrade
                         {
@@ -381,7 +395,7 @@ namespace CryptoManager.Net.Websockets
                 Quantity = x.Quantity,
                 Role = x.Role,
                 TradeId = x.Id,
-                UserId = connection.UserId!.Value,
+                UserId = connection.UserId?.ToString() ?? string.Empty,
                 Side = x.Side
             }));
         }
@@ -403,7 +417,7 @@ namespace CryptoManager.Net.Websockets
                 Quantity = x.Quantity,
                 Role = x.Role,
                 TradeId = x.Id,
-                UserId = connection.UserId!.Value,
+                UserId = connection.UserId?.ToString() ?? string.Empty,
                 Side = x.Side
             }));
 
@@ -427,7 +441,7 @@ namespace CryptoManager.Net.Websockets
                 OrderType = x.OrderType,
                 QuantityFilledBase = x.QuantityFilled?.QuantityInBaseAsset,
                 QuantityFilledQuote = x.QuantityFilled?.QuantityInQuoteAsset,
-                UserId = connection.UserId!.Value
+                UserId = connection.UserId?.ToString() ?? string.Empty
             }));
         }
 
@@ -442,21 +456,21 @@ namespace CryptoManager.Net.Websockets
                 Exchange = @event.Exchange,
                 Available = Math.Round(x.Available, 8),
                 Total = Math.Round(x.Total, 8),
-                UserId = connection.UserId!.Value
+                UserId = connection.UserId?.ToString() ?? string.Empty
             }));
         }
 
         private async Task SaveBalancesAsync(Dictionary<string, UserBalance> dictionary)
         {
-            var context = _dbContextFactory.CreateDbContext();
+            var context = _mongoDatabaseFactory.CreateContext();
 
             // Read the balance from the update from the database to check if they're actually changed
-            var readList = dictionary.Values.Select(x => new UserBalance { Id = x.Id }).ToList();
-            await context.BulkReadAsync(readList, new BulkConfig { WithHoldlock = false, UpdateByProperties = new List<string> { nameof(UserBalance.Id) } });
+            var balanceIds = dictionary.Values.Select(x => x.Id).ToList();
+            var existingBalances = await context.UserBalances.Find(x => balanceIds.Contains(x.Id)).ToListAsync();
 
             var updatedOrNew = dictionary.Where(x =>
             {
-                var balance = readList.SingleOrDefault(r => r.Id == x.Key);
+                var balance = existingBalances.SingleOrDefault(r => r.Id == x.Key);
                 return balance == null || balance.Available != x.Value.Available || balance.Total != x.Value.Total;
             }).Select(x => x.Value).ToList();
             if (updatedOrNew.Count == 0)
@@ -466,7 +480,22 @@ namespace CryptoManager.Net.Websockets
 
             try
             {
-                await context.BulkInsertOrUpdateAsync(dictionary.Values.ToList(), new BulkConfig { WithHoldlock = false });
+                var bulkOps = new List<WriteModel<UserBalance>>();
+                foreach (var balance in updatedOrNew)
+                {
+                    var filter = Builders<UserBalance>.Filter.Eq(x => x.Id, balance.Id);
+                    var update = Builders<UserBalance>.Update
+                        .Set(x => x.Available, balance.Available)
+                        .Set(x => x.Total, balance.Total)
+                        .Set(x => x.Exchange, balance.Exchange)
+                        .Set(x => x.Asset, balance.Asset)
+                        .Set(x => x.UserId, balance.UserId);
+                    
+                    bulkOps.Add(new UpdateOneModel<UserBalance>(filter, update) { IsUpsert = true });
+                }
+                
+                if (bulkOps.Any())
+                    await context.UserBalances.BulkWriteAsync(bulkOps);
             }
             catch (Exception ex)
             {
@@ -476,7 +505,7 @@ namespace CryptoManager.Net.Websockets
 
             foreach (var userUpdates in updatedOrNew.GroupBy(x => x.UserId))
             {
-                var connectionUpdates = _connections.Where(x => x.Value.UserId == userUpdates.Key).ToList();
+                var connectionUpdates = _connections.Where(x => x.Value.UserId?.ToString() == userUpdates.Key).ToList();
                 foreach(var connection in connectionUpdates)
                     SendAuthUpdate(connection.Value.Connection, "Balances", userUpdates.Select(x => new ApiBalance { Asset = x.Asset, Available = x.Available, Total = x.Total, Exchange = x.Exchange }));
             }
@@ -485,8 +514,11 @@ namespace CryptoManager.Net.Websockets
         private async Task SaveOrdersAsync(Dictionary<string, UserOrder> dictionary)
         {
             _logger.LogDebug("Saving batch of {BatchCount} orders", dictionary.Count);
-            var context = _dbContextFactory.CreateDbContext();
-            var existingOrders = await context.UserOrders.Where(x => dictionary.Keys.Contains(x.Id)).ToListAsync();
+            var context = _mongoDatabaseFactory.CreateContext();
+            var existingOrders = await context.UserOrders.Find(x => dictionary.Keys.Contains(x.Id)).ToListAsync();
+
+            var bulkOps = new List<WriteModel<UserOrder>>();
+            var updatedOrders = new List<UserOrder>();
 
             foreach(var order in dictionary)
             {
@@ -494,31 +526,47 @@ namespace CryptoManager.Net.Websockets
                 if (existingOrder == null)
                 {
                     // New order
-                    existingOrders.Add(order.Value);
-                    context.UserOrders.Add(order.Value);
+                    bulkOps.Add(new InsertOneModel<UserOrder>(order.Value));
+                    updatedOrders.Add(order.Value);
                 }
                 else
                 {
                     // Order update
+                    var update = Builders<UserOrder>.Update.Set(x => x.UpdateTime, order.Value.UpdateTime);
+                    
+                    if (order.Value.QuantityFilledBase != null)
+                        update = update.Set(x => x.QuantityFilledBase, order.Value.QuantityFilledBase);
+                    if (order.Value.QuantityFilledQuote != null)
+                        update = update.Set(x => x.QuantityFilledQuote, order.Value.QuantityFilledQuote);
+                    if (order.Value.Status != SharedOrderStatus.Open) // Order status is either already open or it is invalid to put it back to open
+                        update = update.Set(x => x.Status, order.Value.Status);
+
+                    bulkOps.Add(new UpdateOneModel<UserOrder>(
+                        Builders<UserOrder>.Filter.Eq(x => x.Id, order.Key),
+                        update));
+                    
+                    // Update the existing order for the response
                     if (order.Value.QuantityFilledBase != null)
                         existingOrder.QuantityFilledBase = order.Value.QuantityFilledBase;
                     if (order.Value.QuantityFilledQuote != null)
                         existingOrder.QuantityFilledQuote = order.Value.QuantityFilledQuote;
-                    if (order.Value.Status != SharedOrderStatus.Open) // Order status is either already open or it is invalid to put it back to open
+                    if (order.Value.Status != SharedOrderStatus.Open)
                         existingOrder.Status = order.Value.Status;
-
                     existingOrder.UpdateTime = order.Value.UpdateTime;
+                    
+                    updatedOrders.Add(existingOrder);
                 }
             }
 
-            await context.SaveChangesAsync();
+            if (bulkOps.Any())
+                await context.UserOrders.BulkWriteAsync(bulkOps);
 
             foreach (var userUpdates in dictionary.Values.GroupBy(x => x.UserId))
             {
-                var connectionUpdates = _connections.Where(x => x.Value.UserId == userUpdates.Key).ToList();
+                var connectionUpdates = _connections.Where(x => x.Value.UserId?.ToString() == userUpdates.Key).ToList();
                 foreach (var connection in connectionUpdates)
                 {
-                    SendAuthUpdate(connection.Value.Connection, "Orders", existingOrders.Select(x => new ApiOrder
+                    SendAuthUpdate(connection.Value.Connection, "Orders", updatedOrders.Select(x => new ApiOrder
                     {
                         Id = x.Id,
                         Exchange = x.Exchange,
@@ -541,10 +589,32 @@ namespace CryptoManager.Net.Websockets
         private async Task SaveUserTradesAsync(Dictionary<string, UserTrade> dictionary)
         {
             _logger.LogDebug("Saving batch of {BatchCount} user trades", dictionary.Count);
-            var context = _dbContextFactory.CreateDbContext();
+            var context = _mongoDatabaseFactory.CreateContext();
             try
             {
-                await context.BulkInsertOrUpdateAsync(dictionary.Values.ToList(), new BulkConfig { WithHoldlock = false });
+                var bulkOps = new List<WriteModel<UserTrade>>();
+                foreach (var trade in dictionary.Values)
+                {
+                    var filter = Builders<UserTrade>.Filter.Eq(x => x.Id, trade.Id);
+                    var update = Builders<UserTrade>.Update
+                        .Set(x => x.Exchange, trade.Exchange)
+                        .Set(x => x.SymbolId, trade.SymbolId)
+                        .Set(x => x.TradeId, trade.TradeId)
+                        .Set(x => x.Price, trade.Price)
+                        .Set(x => x.Quantity, trade.Quantity)
+                        .Set(x => x.FeeAsset, trade.FeeAsset)
+                        .Set(x => x.Fee, trade.Fee)
+                        .Set(x => x.Role, trade.Role)
+                        .Set(x => x.Side, trade.Side)
+                        .Set(x => x.CreateTime, trade.CreateTime)
+                        .Set(x => x.OrderId, trade.OrderId)
+                        .Set(x => x.UserId, trade.UserId);
+                    
+                    bulkOps.Add(new UpdateOneModel<UserTrade>(filter, update) { IsUpsert = true });
+                }
+                
+                if (bulkOps.Any())
+                    await context.UserTrades.BulkWriteAsync(bulkOps);
             }
             catch (Exception ex)
             {
@@ -554,7 +624,7 @@ namespace CryptoManager.Net.Websockets
 
             foreach (var userUpdates in dictionary.Values.GroupBy(x => x.UserId))
             {
-                var connectionUpdates = _connections.Where(x => x.Value.UserId == userUpdates.Key).ToList();
+                var connectionUpdates = _connections.Where(x => x.Value.UserId?.ToString() == userUpdates.Key).ToList();
                 foreach (var connection in connectionUpdates)
                 {
                     SendAuthUpdate(connection.Value.Connection, "UserTrades", userUpdates.Select(x => new ApiUserTrade

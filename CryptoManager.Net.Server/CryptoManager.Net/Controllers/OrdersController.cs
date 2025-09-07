@@ -9,9 +9,9 @@ using CryptoManager.Net.Database;
 using CryptoManager.Net.Database.Models;
 using CryptoManager.Net.Models.Requests;
 using CryptoManager.Net.Models.Response;
-using EFCore.BulkExtensions;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
+using MongoDB.Driver;
+using MongoDB.Bson;
 using System.Linq.Expressions;
 
 namespace CryptoManager.Net.Controllers
@@ -24,7 +24,7 @@ namespace CryptoManager.Net.Controllers
         private readonly ILogger _logger;
         private readonly IExchangeUserClientProvider _clientProvider;
 
-        public OrdersController(ILogger<BalancesController> logger, IExchangeUserClientProvider clientProvider, TrackerContext dbContext) : base(dbContext)
+        public OrdersController(ILogger<BalancesController> logger, IExchangeUserClientProvider clientProvider, MongoTrackerContext dbContext) : base(dbContext)
         {
             _logger = logger;
             _clientProvider = clientProvider;
@@ -40,38 +40,40 @@ namespace CryptoManager.Net.Controllers
             int page = 1,
             int pageSize = 20)
         {
-            var dbQuery = _dbContext.UserOrders.Where(x => x.UserId == UserId && x.Status == SharedOrderStatus.Open);
+            var filterBuilder = Builders<UserOrder>.Filter;
+            var filter = filterBuilder.And(
+                filterBuilder.Eq(x => x.UserId, UserId),
+                filterBuilder.Eq(x => x.Status, SharedOrderStatus.Open)
+            );
+
             if (!string.IsNullOrEmpty(exchange))
-                dbQuery = dbQuery.Where(x => x.Exchange == exchange);
+                filter = filterBuilder.And(filter, filterBuilder.Eq(x => x.Exchange, exchange));
 
             if (!string.IsNullOrEmpty(baseAsset) && !string.IsNullOrEmpty(quoteAsset))
-                dbQuery = dbQuery.Where(x => x.SymbolId.EndsWith($"{baseAsset}-{quoteAsset}"));
+                filter = filterBuilder.And(filter, filterBuilder.Regex(x => x.SymbolId, new BsonRegularExpression($"{baseAsset}-{quoteAsset}$")));
             else if (!string.IsNullOrEmpty(baseAsset))
-                dbQuery = dbQuery.Where(x => x.SymbolId.Contains($"-{baseAsset}-"));
+                filter = filterBuilder.And(filter, filterBuilder.Regex(x => x.SymbolId, new BsonRegularExpression($"-{baseAsset}-")));
             else if (!string.IsNullOrEmpty(quoteAsset))
-                dbQuery = dbQuery.Where(x => x.SymbolId.EndsWith($"-{quoteAsset}"));
+                filter = filterBuilder.And(filter, filterBuilder.Regex(x => x.SymbolId, new BsonRegularExpression($"-{quoteAsset}$")));
 
             if (string.IsNullOrEmpty(orderBy))
                 orderBy = nameof(ApiOrder.CreateTime);
 
-            Expression<Func<UserOrder, object?>> order = orderBy switch
+            var sortBuilder = Builders<UserOrder>.Sort;
+            var sort = orderBy switch
             {
-                nameof(ApiOrder.CreateTime) => order => order.CreateTime,
-                nameof(ApiOrder.OrderPrice) => order => order.OrderPrice,
-                nameof(ApiOrder.AveragePrice) => order => order.AveragePrice,
-                nameof(ApiOrder.OrderQuantityBase) => order => order.OrderQuantityBase,
-                nameof(ApiOrder.OrderQuantityQuote) => order => order.OrderQuantityQuote,
+                nameof(ApiOrder.CreateTime) => orderDirection == OrderDirection.Ascending ? sortBuilder.Ascending(x => x.CreateTime) : sortBuilder.Descending(x => x.CreateTime),
+                nameof(ApiOrder.OrderPrice) => orderDirection == OrderDirection.Ascending ? sortBuilder.Ascending(x => x.OrderPrice) : sortBuilder.Descending(x => x.OrderPrice),
+                nameof(ApiOrder.AveragePrice) => orderDirection == OrderDirection.Ascending ? sortBuilder.Ascending(x => x.AveragePrice) : sortBuilder.Descending(x => x.AveragePrice),
+                nameof(ApiOrder.OrderQuantityBase) => orderDirection == OrderDirection.Ascending ? sortBuilder.Ascending(x => x.OrderQuantityBase) : sortBuilder.Descending(x => x.OrderQuantityBase),
+                nameof(ApiOrder.OrderQuantityQuote) => orderDirection == OrderDirection.Ascending ? sortBuilder.Ascending(x => x.OrderQuantityQuote) : sortBuilder.Descending(x => x.OrderQuantityQuote),
                 _ => throw new ArgumentException(),
             };
 
-            dbQuery = orderDirection == OrderDirection.Ascending
-                ? dbQuery.OrderBy(order)
-                : dbQuery.OrderByDescending(order);
+            var total = await _dbContext.UserOrders.CountDocumentsAsync(filter);
+            var pageData = await _dbContext.UserOrders.Find(filter).Sort(sort).Skip((page - 1) * pageSize).Limit(pageSize).ToListAsync();
 
-            var total = await dbQuery.CountAsync();
-            var pageData = await dbQuery.Skip((page - 1) * pageSize).Take(pageSize).AsNoTracking().ToListAsync();
-
-            return ApiResultPaged<IEnumerable<ApiOrder>>.Ok(page, pageSize, total, pageData.Select(x => new ApiOrder
+            return ApiResultPaged<IEnumerable<ApiOrder>>.Ok(page, pageSize, (int)total, pageData.Select(x => new ApiOrder
             {
                 Exchange = x.Exchange,
                 AveragePrice = x.AveragePrice,
@@ -100,29 +102,34 @@ namespace CryptoManager.Net.Controllers
             int pageSize = 20)
         {
             var partSymbolId = $"-{baseAsset}-{quoteAsset}";
-            var dbQuery = _dbContext.UserOrders.Where(x => x.UserId == UserId && (exchange == null ? true : x.Exchange == exchange) && x.SymbolId.EndsWith(partSymbolId) && x.Status != SharedOrderStatus.Open);
+            var filterBuilder = Builders<UserOrder>.Filter;
+            var filter = filterBuilder.And(
+                filterBuilder.Eq(x => x.UserId, UserId),
+                filterBuilder.Regex(x => x.SymbolId, new BsonRegularExpression($"{partSymbolId}$")),
+                filterBuilder.Ne(x => x.Status, SharedOrderStatus.Open)
+            );
+
+            if (!string.IsNullOrEmpty(exchange))
+                filter = filterBuilder.And(filter, filterBuilder.Eq(x => x.Exchange, exchange));
 
             if (string.IsNullOrEmpty(orderBy))
                 orderBy = nameof(ApiOrder.CreateTime);
 
-            Expression<Func<UserOrder, object?>> order = orderBy switch
+            var sortBuilder = Builders<UserOrder>.Sort;
+            var sort = orderBy switch
             {
-                nameof(ApiOrder.CreateTime) => order => order.CreateTime,
-                nameof(ApiOrder.OrderPrice) => order => order.OrderPrice,
-                nameof(ApiOrder.AveragePrice) => order => order.AveragePrice,
-                nameof(ApiOrder.OrderQuantityBase) => order => order.OrderQuantityBase,
-                nameof(ApiOrder.OrderQuantityQuote) => order => order.OrderQuantityQuote,
+                nameof(ApiOrder.CreateTime) => orderDirection == OrderDirection.Ascending ? sortBuilder.Ascending(x => x.CreateTime) : sortBuilder.Descending(x => x.CreateTime),
+                nameof(ApiOrder.OrderPrice) => orderDirection == OrderDirection.Ascending ? sortBuilder.Ascending(x => x.OrderPrice) : sortBuilder.Descending(x => x.OrderPrice),
+                nameof(ApiOrder.AveragePrice) => orderDirection == OrderDirection.Ascending ? sortBuilder.Ascending(x => x.AveragePrice) : sortBuilder.Descending(x => x.AveragePrice),
+                nameof(ApiOrder.OrderQuantityBase) => orderDirection == OrderDirection.Ascending ? sortBuilder.Ascending(x => x.OrderQuantityBase) : sortBuilder.Descending(x => x.OrderQuantityBase),
+                nameof(ApiOrder.OrderQuantityQuote) => orderDirection == OrderDirection.Ascending ? sortBuilder.Ascending(x => x.OrderQuantityQuote) : sortBuilder.Descending(x => x.OrderQuantityQuote),
                 _ => throw new ArgumentException(),
             };
 
-            dbQuery = orderDirection == OrderDirection.Ascending
-                ? dbQuery.OrderBy(order)
-                : dbQuery.OrderByDescending(order);
+            var total = await _dbContext.UserOrders.CountDocumentsAsync(filter);
+            var pageData = await _dbContext.UserOrders.Find(filter).Sort(sort).Skip((page - 1) * pageSize).Limit(pageSize).ToListAsync();
 
-            var total = await dbQuery.CountAsync();
-            var pageData = await dbQuery.Skip((page - 1) * pageSize).Take(pageSize).AsNoTracking().ToListAsync();
-
-            return ApiResultPaged<IEnumerable<ApiOrder>>.Ok(page, pageSize, total, pageData.Select(x => new ApiOrder
+            return ApiResultPaged<IEnumerable<ApiOrder>>.Ok(page, pageSize, (int)total, pageData.Select(x => new ApiOrder
             {
                 Exchange = x.Exchange,
                 AveragePrice = x.AveragePrice,
@@ -144,7 +151,12 @@ namespace CryptoManager.Net.Controllers
         public async Task<ApiResult> PlaceOrderAsync([FromBody] PlaceOrderRequest request)
         {
             var symbolData = request.SymbolId.Split("-");
-            var apiKey = await _dbContext.UserApiKeys.Where(x => x.UserId == UserId && !x.Invalid && x.Exchange == symbolData[0]).SingleOrDefaultAsync();
+            var apiKeyFilter = Builders<UserApiKey>.Filter.And(
+                Builders<UserApiKey>.Filter.Eq(x => x.UserId, UserId),
+                Builders<UserApiKey>.Filter.Eq(x => x.Invalid, false),
+                Builders<UserApiKey>.Filter.Eq(x => x.Exchange, symbolData[0])
+            );
+            var apiKey = await _dbContext.UserApiKeys.Find(apiKeyFilter).FirstOrDefaultAsync();
             if (apiKey == null)
                 return ApiResult.Error(ApiErrors.NoApiKeyConfigured);
 
@@ -158,8 +170,9 @@ namespace CryptoManager.Net.Controllers
             {
                 // Some exchanges require a price to be sent even for market orders so they can calculate a slippage and simulate a market order even 
                 // if the exchange doesn't directly support it
-                var ticker = await _dbContext.Symbols.SingleAsync(x => x.Id == request.SymbolId);
-                price = ticker.LastPrice?.Normalize();
+                var tickerFilter = Builders<ExchangeSymbol>.Filter.Eq(x => x.Id, request.SymbolId);
+                var ticker = await _dbContext.Symbols.Find(tickerFilter).FirstOrDefaultAsync();
+                price = ticker?.LastPrice?.Normalize();
             }
 
             var sharedSymbol = new SharedSymbol(TradingMode.Spot, symbolData[1], symbolData[2]);
@@ -181,14 +194,23 @@ namespace CryptoManager.Net.Controllers
         [HttpDelete("{id}")]
         public async Task<ApiResult> CancelOrderAsync(string id)
         {
-            var order = await _dbContext.UserOrders.SingleOrDefaultAsync(x => x.UserId == UserId && x.Id == id);
+            var orderFilter = Builders<UserOrder>.Filter.And(
+                Builders<UserOrder>.Filter.Eq(x => x.UserId, UserId),
+                Builders<UserOrder>.Filter.Eq(x => x.Id, id)
+            );
+            var order = await _dbContext.UserOrders.Find(orderFilter).FirstOrDefaultAsync();
             if (order == null)
             {
                 _logger.LogDebug("Order to cancel not found");
                 return ApiResult.Error(ErrorType.UnknownOrder, null, "Not found");
             }
 
-            var apiKeys = await _dbContext.UserApiKeys.Where(x => x.UserId == UserId && !x.Invalid && x.Exchange == order.Exchange).ToListAsync();
+            var apiKeyFilter = Builders<UserApiKey>.Filter.And(
+                Builders<UserApiKey>.Filter.Eq(x => x.UserId, UserId),
+                Builders<UserApiKey>.Filter.Eq(x => x.Invalid, false),
+                Builders<UserApiKey>.Filter.Eq(x => x.Exchange, order.Exchange)
+            );
+            var apiKeys = await _dbContext.UserApiKeys.Find(apiKeyFilter).ToListAsync();
 
             var environments = apiKeys.ToDictionary(x => x.Exchange, x => (string?)x.Environment);
             var credentials = apiKeys.ToDictionary(x => x.Exchange, x => new ApiCredentials(x.Key, x.Secret, x.Pass));
@@ -206,7 +228,11 @@ namespace CryptoManager.Net.Controllers
         [HttpGet("{id}")]
         public async Task<ApiResult<ApiOrder>> GetOrderAsync(string id)
         {
-            var order = await _dbContext.UserOrders.Where(x => x.UserId == UserId && x.Id == id).SingleOrDefaultAsync();
+            var orderFilter = Builders<UserOrder>.Filter.And(
+                Builders<UserOrder>.Filter.Eq(x => x.UserId, UserId),
+                Builders<UserOrder>.Filter.Eq(x => x.Id, id)
+            );
+            var order = await _dbContext.UserOrders.Find(orderFilter).FirstOrDefaultAsync();
             if (order == null)
                 return ApiResult<ApiOrder>.Error(ErrorType.UnknownOrder, null, "Order not found");
 
@@ -238,10 +264,13 @@ namespace CryptoManager.Net.Controllers
             if (!string.IsNullOrEmpty(symbolId))
                 symbolData = symbolId.Split("-");
 
-            var keyQuery = _dbContext.UserApiKeys.Where(x => x.UserId == UserId && !x.Invalid);
+            var keyFilter = Builders<UserApiKey>.Filter.And(
+                Builders<UserApiKey>.Filter.Eq(x => x.UserId, UserId),
+                Builders<UserApiKey>.Filter.Eq(x => x.Invalid, false)
+            );
             if (symbolData != null)
-                keyQuery = keyQuery.Where(x => x.Exchange == symbolData[0]);
-            var apiKeys = await keyQuery.ToListAsync();
+                keyFilter = Builders<UserApiKey>.Filter.And(keyFilter, Builders<UserApiKey>.Filter.Eq(x => x.Exchange, symbolData[0]));
+            var apiKeys = await _dbContext.UserApiKeys.Find(keyFilter).ToListAsync();
             if (!apiKeys.Any())
                 return ApiResult.Error(ApiErrors.NoApiKeyConfigured);
 
@@ -265,11 +294,11 @@ namespace CryptoManager.Net.Controllers
                 orders = await client.GetSpotOpenOrdersAsync(new GetOpenOrdersRequest(new SharedSymbol(TradingMode.Spot, symbolData[1], symbolData[2])), apiKeys.Select(x => x.Exchange));
             }
 
-#warning If open orders doesn't return an order we currently have as open we should close it
+// TODO: If open orders doesn't return an order we currently have as open we should close it
             var dbOrders = orders.Where(x => x.Success).SelectMany(x => x.Data.Select(y => ParseOrder(x.Exchange, y))).ToArray();
-            await _dbContext.BulkInsertOrUpdateAsync(dbOrders, new BulkConfig { WithHoldlock = false });
+            await _dbContext.BulkInsertOrUpdateAsync(dbOrders);
 
-#warning Ignore errors here because they're probably because of symbol not existing. Should first check if the symbol exists on the exchange
+// TODO: Ignore errors here because they're probably because of symbol not existing. Should first check if the symbol exists on the exchange
             //var errors = orders.Where(x => !x).Select(x => new ApiError(x.Error!.ErrorType, x.Error.ErrorCode, x.Exchange + ": " +x.Error.Message));
             //if (errors.Any())
             //    return ApiResult.Error(errors);
@@ -283,7 +312,13 @@ namespace CryptoManager.Net.Controllers
             if (!await CheckUserUpdateTopicAsync(UserUpdateType.ClosedOrders))
                 return ApiResult.Ok();
 
-            var apiKeys = await _dbContext.UserApiKeys.Where(x => x.UserId == UserId && !x.Invalid && (exchange == null ? true : x.Exchange == exchange)).ToListAsync();
+            var apiKeyFilter = Builders<UserApiKey>.Filter.And(
+                Builders<UserApiKey>.Filter.Eq(x => x.UserId, UserId),
+                Builders<UserApiKey>.Filter.Eq(x => x.Invalid, false)
+            );
+            if (!string.IsNullOrEmpty(exchange))
+                apiKeyFilter = Builders<UserApiKey>.Filter.And(apiKeyFilter, Builders<UserApiKey>.Filter.Eq(x => x.Exchange, exchange));
+            var apiKeys = await _dbContext.UserApiKeys.Find(apiKeyFilter).ToListAsync();
             if (apiKeys == null)
                 return ApiResult.Error(ApiErrors.NoApiKeyConfigured);
 
@@ -298,9 +333,9 @@ namespace CryptoManager.Net.Controllers
             var dbOrders = closedOrders.Where(x => x.Success).SelectMany(y => y.Data.Select(x => ParseOrder(y.Exchange, x)));
             // Want to update full?
             // Maybe keep a track of until what timestamp a users order history is fully synced so a new update can request up to that point?
-            await _dbContext.BulkInsertOrUpdateAsync(dbOrders, new BulkConfig { WithHoldlock = false });
+            await _dbContext.BulkInsertOrUpdateAsync(dbOrders);
 
-#warning Ignore errors here because they're probably because of symbol not existing. Should first check if the symbol exists on the exchange
+// TODO: Ignore errors here because they're probably because of symbol not existing. Should first check if the symbol exists on the exchange
             //var failed = closedOrders.FirstOrDefault(x => !x.Success);
             //if (failed != null)
             //    return ApiResult.Error(new ApiError(failed.Error!.ErrorType, failed.Error.ErrorCode, failed.Error.Message));

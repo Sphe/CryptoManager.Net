@@ -4,6 +4,7 @@
     {
         Ticker,
         Trade,
-        OrderBook
+        OrderBook,
+        KLine
     }
 }

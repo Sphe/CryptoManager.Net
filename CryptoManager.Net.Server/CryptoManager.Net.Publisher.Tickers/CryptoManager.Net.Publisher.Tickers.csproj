@@ -13,6 +13,7 @@
   <ItemGroup>
     <ProjectReference Include="..\CryptoManager.Net.Models\CryptoManager.Net.Models.csproj" />
     <ProjectReference Include="..\CryptoManager.Net.Publish\CryptoManager.Net.Data.csproj" />
+    <ProjectReference Include="..\CryptoManager.Net.Services.External\CryptoManager.Net.Services.External.csproj" />
   </ItemGroup>
 
 </Project>

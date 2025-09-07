@@ -4,6 +4,9 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace CryptoManager.Net.Controllers;
 
+/// <summary>
+/// Controller for WebSocket connections
+/// </summary>
 [ApiController]
 public class WebsocketController : ControllerBase
 {
@@ -16,6 +19,13 @@ public class WebsocketController : ControllerBase
         _websocketManager = manager;
     }
 
+    /// <summary>
+    /// Establishes a WebSocket connection for real-time data streaming
+    /// </summary>
+    /// <returns>WebSocket connection</returns>
+    /// <response code="101">WebSocket connection established</response>
+    /// <response code="400">Invalid WebSocket request</response>
+    [HttpGet]
     [Route("/ws")]
     [AllowAnonymous]
     public async Task ConnectAsync()

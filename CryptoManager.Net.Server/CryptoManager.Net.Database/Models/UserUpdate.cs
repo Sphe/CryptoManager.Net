@@ -1,16 +1,25 @@
-﻿using Microsoft.EntityFrameworkCore;
+﻿using MongoDB.Bson;
+using MongoDB.Bson.Serialization.Attributes;
 
 namespace CryptoManager.Net.Database.Models
 {
-    [Index(nameof(UserId), nameof(Type), IsUnique = true)]
     public class UserUpdate
     {
-        public int Id { get; set; }
+        [BsonId]
+        [BsonRepresentation(BsonType.ObjectId)]
+        public string Id { get; set; } = string.Empty;
+        
+        [BsonElement("type")]
         public UserUpdateType Type { get; set; }
+        
+        [BsonElement("lastUpdate")]
         public DateTime LastUpdate { get; set; }
 
-        public int UserId { get; set; }
-        public virtual User User { get; set; } = default!;
+        [BsonElement("userId")]
+        public string UserId { get; set; } = string.Empty;
+        
+        [BsonIgnore]
+        public User User { get; set; } = default!;
     }
 
 

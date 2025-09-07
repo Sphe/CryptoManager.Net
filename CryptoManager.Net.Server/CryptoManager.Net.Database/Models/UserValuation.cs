@@ -1,15 +1,25 @@
-﻿using Microsoft.EntityFrameworkCore;
+﻿using MongoDB.Bson;
+using MongoDB.Bson.Serialization.Attributes;
 
 namespace CryptoManager.Net.Database.Models
 {
     public class UserValuation
     {
+        [BsonId]
+        [BsonRepresentation(BsonType.ObjectId)]
         public string Id { get; set; } = string.Empty;
-        [Precision(28, 8)]
+        
+        [BsonElement("value")]
+        [BsonRepresentation(BsonType.Decimal128)]
         public decimal Value { get; set; }
+        
+        [BsonElement("timestamp")]
         public DateTime Timestamp { get; set; }
 
-        public int UserId { get; set; }
+        [BsonElement("userId")]
+        public string UserId { get; set; } = string.Empty;
+        
+        [BsonIgnore]
         public User User { get; set; } = default!;
     }
 }

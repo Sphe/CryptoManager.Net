@@ -5,7 +5,8 @@ using CryptoManager.Net.Models.Response;
 using CryptoManager.Net.Websockets;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
+using MongoDB.Driver;
+using MongoDB.Bson;
 
 namespace CryptoManager.Net.Controllers;
 
@@ -19,7 +20,7 @@ public class SystemController : ApiController
 
     public SystemController(
         ILogger<SystemController> logger,
-        TrackerContext context,
+        MongoTrackerContext context,
         IExchangeSocketClient socketClient,
         WebsocketManager websocketManager) : base(context)
     {
@@ -33,13 +34,31 @@ public class SystemController : ApiController
     [ServerCache(Duration = 10)]
     public async Task<ApiResult<ApiSystemStatus>> GetSystemStatsAsync()
     {
+        // Get distinct exchanges using MongoDB aggregation
+        var exchangesPipeline = new[]
+        {
+            new BsonDocument("$group", new BsonDocument("_id", "$Exchange")),
+            new BsonDocument("$count", "count")
+        };
+        var exchangesResult = await _dbContext.Symbols.Aggregate<BsonDocument>(exchangesPipeline).FirstOrDefaultAsync();
+        var exchangesCount = exchangesResult?["count"]?.AsInt32 ?? 0;
+
+        // Get distinct assets using MongoDB aggregation
+        var assetsPipeline = new[]
+        {
+            new BsonDocument("$group", new BsonDocument("_id", "$BaseAsset")),
+            new BsonDocument("$count", "count")
+        };
+        var assetsResult = await _dbContext.Symbols.Aggregate<BsonDocument>(assetsPipeline).FirstOrDefaultAsync();
+        var assetsCount = assetsResult?["count"]?.AsInt32 ?? 0;
+
         return ApiResult<ApiSystemStatus>.Ok(new ApiSystemStatus
         {
             IncomingKbps = _socketClient.IncomingKbps,
 
-            Exchanges = await _dbContext.Symbols.Select(x => x.Exchange).Distinct().CountAsync(),
-            Symbols = await _dbContext.Symbols.CountAsync(),
-            Assets = await _dbContext.Symbols.Select(x => x.BaseAsset).Distinct().CountAsync(),
+            Exchanges = exchangesCount,
+            Symbols = (int)await _dbContext.Symbols.CountDocumentsAsync(_ => true),
+            Assets = assetsCount,
 
             WebsocketConnections = _websocketManager.ConnectionCount,
             UserSubscriptions = _websocketManager.UserConnectionCount,

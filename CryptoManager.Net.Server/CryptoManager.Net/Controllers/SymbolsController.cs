@@ -7,7 +7,8 @@ using CryptoManager.Net.Models.Requests;
 using CryptoManager.Net.Models.Response;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
+using MongoDB.Driver;
+using MongoDB.Bson;
 using System.Linq.Expressions;
 
 namespace CryptoManager.Net.Controllers;
@@ -20,7 +21,7 @@ public class SymbolsController : ApiController
     private readonly ILogger _logger;
     private readonly IExchangeRestClient _restClient;
 
-    public SymbolsController(ILogger<SymbolsController> logger, TrackerContext dbContext, IExchangeRestClient restClient) : base(dbContext)
+    public SymbolsController(ILogger<SymbolsController> logger, MongoTrackerContext dbContext, IExchangeRestClient restClient) : base(dbContext)
     {
         _logger = logger;
         _restClient = restClient;
@@ -39,39 +40,56 @@ public class SymbolsController : ApiController
         int page = 1,
         int pageSize = 20)
     {
-        IQueryable<ExchangeSymbol> dbQuery = _dbContext.Symbols.Where(x => x.UsdVolume >= minUsdVolume);
+        // Build MongoDB filter
+        var filterBuilder = Builders<ExchangeSymbol>.Filter;
+        var filters = new List<FilterDefinition<ExchangeSymbol>>();
+
+        filters.Add(filterBuilder.Gte(x => x.UsdVolume, minUsdVolume));
+
         if (!string.IsNullOrEmpty(exchange))
-            dbQuery = dbQuery.Where(x => x.Exchange == exchange);
+            filters.Add(filterBuilder.Eq(x => x.Exchange, exchange));
 
         if (!string.IsNullOrEmpty(query))
-            dbQuery = dbQuery.Where(x => x.Name.Contains(query));
+            filters.Add(filterBuilder.Regex(x => x.Name, new BsonRegularExpression(query, "i")));
 
         if (!string.IsNullOrEmpty(baseAsset))
-            dbQuery = dbQuery.Where(x => x.BaseAsset == baseAsset);
+            filters.Add(filterBuilder.Eq(x => x.BaseAsset, baseAsset));
 
         if (!string.IsNullOrEmpty(quoteAsset))
-            dbQuery = dbQuery.Where(x => x.QuoteAsset == quoteAsset);
-                
+            filters.Add(filterBuilder.Eq(x => x.QuoteAsset, quoteAsset));
+
+        var filter = filters.Count > 1 ? filterBuilder.And(filters) : filters.FirstOrDefault() ?? filterBuilder.Empty;
+
+        // Build sort
         if (string.IsNullOrEmpty(orderBy))
             orderBy = nameof(ExchangeSymbol.UsdVolume);
 
-        Expression<Func<ExchangeSymbol, decimal?>> order = orderBy switch
+        var sortDirection = orderDirection == OrderDirection.Ascending ? SortDirection.Ascending : SortDirection.Descending;
+        var sortField = orderBy switch
         {
-            nameof(ApiSymbol.Volume) => symbol => symbol.Volume,
-            nameof(ApiSymbol.QuoteVolume) => symbol => symbol.QuoteVolume,
-            nameof(ApiSymbol.UsdVolume) => symbol => symbol.UsdVolume,
-            nameof(ApiSymbol.ChangePercentage) => symbol => symbol.ChangePercentage,
-            _ => throw new ArgumentException(),
+            nameof(ApiSymbol.Volume) => "Volume",
+            nameof(ApiSymbol.QuoteVolume) => "QuoteVolume",
+            nameof(ApiSymbol.UsdVolume) => "UsdVolume",
+            nameof(ApiSymbol.ChangePercentage) => "ChangePercentage",
+            _ => "UsdVolume"
         };
-        
-        dbQuery = orderDirection == OrderDirection.Ascending
-            ? dbQuery.OrderBy(order)
-            : dbQuery.OrderByDescending(order);
 
-        var total = await dbQuery.CountAsync();
-        var result = await dbQuery.Skip((page - 1) * pageSize).Take(pageSize).AsNoTracking().ToListAsync();
+        var sort = Builders<ExchangeSymbol>.Sort.Descending(sortField);
+        if (sortDirection == SortDirection.Ascending)
+            sort = Builders<ExchangeSymbol>.Sort.Ascending(sortField);
 
-        return ApiResultPaged<IEnumerable<ApiSymbol>>.Ok(page, pageSize, total, result.Select(x => new ApiSymbol
+        // Get total count
+        var total = await _dbContext.Symbols.CountDocumentsAsync(filter);
+
+        // Get paginated results
+        var result = await _dbContext.Symbols
+            .Find(filter)
+            .Sort(sort)
+            .Skip((page - 1) * pageSize)
+            .Limit(pageSize)
+            .ToListAsync();
+
+        return ApiResultPaged<IEnumerable<ApiSymbol>>.Ok(page, pageSize, (int)total, result.Select(x => new ApiSymbol
         {
             Id = x.Id,
             Name = x.BaseAsset + "/" + x.QuoteAsset,
@@ -90,7 +108,8 @@ public class SymbolsController : ApiController
     [ServerCache(Duration = 10)]
     public async Task<ApiResult<ApiSymbolDetails>> GetSymbolAsync(string id)
     {
-        var symbol = await _dbContext.Symbols.SingleOrDefaultAsync(x => x.Id == id);
+        var filter = Builders<ExchangeSymbol>.Filter.Eq(x => x.Id, id);
+        var symbol = await _dbContext.Symbols.Find(filter).FirstOrDefaultAsync();
         if (symbol == null)
         {
             _logger.LogDebug("Symbol with id {Id} not found", id);
@@ -136,13 +155,38 @@ public class SymbolsController : ApiController
         string? baseAsset = null,
         string? quoteAsset = null)
     {
-        var symbolQuery = _dbContext.Symbols.Where(x => x.Exchange == exchange);
-        if (!string.IsNullOrEmpty(baseAsset))
-            symbolQuery = symbolQuery.Where(x => x.BaseAsset == baseAsset);
-        if (!string.IsNullOrEmpty(quoteAsset))
-            symbolQuery = symbolQuery.Where(x => x.QuoteAsset == quoteAsset);
+        // Build MongoDB aggregation pipeline
+        var pipeline = new List<BsonDocument>();
 
-        var result = await symbolQuery.GroupBy(x => x.BaseAsset).ToDictionaryAsync(x => x.Key, x => x.Select(y => y.QuoteAsset).ToList());
+        // Match stage
+        var matchFilters = new List<BsonElement>
+        {
+            new BsonElement("Exchange", exchange)
+        };
+
+        if (!string.IsNullOrEmpty(baseAsset))
+            matchFilters.Add(new BsonElement("BaseAsset", baseAsset));
+        if (!string.IsNullOrEmpty(quoteAsset))
+            matchFilters.Add(new BsonElement("QuoteAsset", quoteAsset));
+
+        pipeline.Add(new BsonDocument("$match", new BsonDocument(matchFilters)));
+
+        // Group by BaseAsset and collect QuoteAssets
+        pipeline.Add(new BsonDocument("$group", new BsonDocument
+        {
+            { "_id", "$BaseAsset" },
+            { "QuoteAssets", new BsonDocument("$push", "$QuoteAsset") }
+        }));
+
+        // Execute aggregation
+        var aggregationResult = await _dbContext.Symbols.Aggregate<BsonDocument>(pipeline).ToListAsync();
+
+        // Convert to dictionary
+        var result = aggregationResult.ToDictionary(
+            x => x["_id"].AsString,
+            x => x["QuoteAssets"].AsBsonArray.Select(y => y.AsString).ToList()
+        );
+
         return ApiResult<ApiExchangeSymbols>.Ok(new ApiExchangeSymbols { Exchange = exchange, Symbols = result });
     }
 }

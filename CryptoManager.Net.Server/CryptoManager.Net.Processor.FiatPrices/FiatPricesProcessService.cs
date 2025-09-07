@@ -1,8 +1,7 @@
 ﻿using CryptoManager.Net.Database;
 using CryptoManager.Net.Publish;
-using EFCore.BulkExtensions;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using MongoDB.Driver;
 
 namespace CryptoManager.Net.Processor.FiatPrices
 {
@@ -11,16 +10,16 @@ namespace CryptoManager.Net.Processor.FiatPrices
         private CancellationToken _stoppingToken = default;
         private readonly ILogger _logger;
         private readonly IProcessInput<Models.FiatPrice> _processInput;
-        private readonly IDbContextFactory<TrackerContext> _dbContextFactory;
+        private readonly IMongoDatabaseFactory _mongoDatabaseFactory;
 
         public FiatPricesProcessService(
             ILogger<FiatPricesProcessService> logger,
             IProcessInput<Models.FiatPrice> publishOutput,
-            IDbContextFactory<TrackerContext> dbContextFactory)
+            IMongoDatabaseFactory mongoDatabaseFactory)
         {
             _logger = logger;
             _processInput = publishOutput;
-            _dbContextFactory = dbContextFactory;
+            _mongoDatabaseFactory = mongoDatabaseFactory;
         }
 
         public async Task ExecuteAsync(CancellationToken ct)
@@ -40,7 +39,7 @@ namespace CryptoManager.Net.Processor.FiatPrices
 
         private async Task ProcessAsync(PublishItem<Models.FiatPrice> update)
         {
-            var context = _dbContextFactory.CreateDbContext();
+            var context = _mongoDatabaseFactory.CreateContext();
 
             var fiatPrices = new List<Database.Models.FiatPrice>();
             foreach (var item in update.Data)
@@ -57,7 +56,19 @@ namespace CryptoManager.Net.Processor.FiatPrices
 
             try
             {
-                await context.BulkInsertOrUpdateAsync(fiatPrices, new BulkConfig { WithHoldlock = false });
+                var bulkOps = new List<WriteModel<Database.Models.FiatPrice>>();
+                foreach (var fiatPrice in fiatPrices)
+                {
+                    var filter = Builders<Database.Models.FiatPrice>.Filter.Eq(x => x.Id, fiatPrice.Id);
+                    var updateDefinition = Builders<Database.Models.FiatPrice>.Update
+                        .Set(x => x.Price, fiatPrice.Price)
+                        .Set(x => x.UpdateTime, fiatPrice.UpdateTime);
+
+                    bulkOps.Add(new UpdateOneModel<Database.Models.FiatPrice>(filter, updateDefinition) { IsUpsert = true });
+                }
+
+                if (bulkOps.Any())
+                    await context.FiatPrices.BulkWriteAsync(bulkOps);
             }
             catch(Exception ex)
             {

@@ -1,11 +1,8 @@
-﻿using Microsoft.EntityFrameworkCore;
-
-namespace CryptoManager.Net.Database.Projections
+﻿namespace CryptoManager.Net.Database.Projections
 {
     public class ExchangeUserValue
     {
-        public int UserId { get; set; }
-        [Precision(28, 8)]
+        public string UserId { get; set; } = string.Empty;
         public decimal UsdValue { get; set; }
     }
 }

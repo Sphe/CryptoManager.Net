@@ -2,9 +2,8 @@
 using CryptoManager.Net.Database.Models;
 using CryptoManager.Net.Models;
 using CryptoManager.Net.Publish;
-using EFCore.BulkExtensions;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using MongoDB.Driver;
 
 namespace CryptoManager.Net.Processor.Tickers
 {
@@ -14,18 +13,18 @@ namespace CryptoManager.Net.Processor.Tickers
         private readonly ILogger _logger;
         private readonly IProcessInput<Ticker> _processInput;
         private readonly IPublishOutput<PendingAssetCalculation> _publishOutput;
-        private readonly IDbContextFactory<TrackerContext> _dbContextFactory;
+        private readonly IMongoDatabaseFactory _mongoDatabaseFactory;
 
         public TickerProcessService(
             ILogger<TickerProcessService> logger,
             IProcessInput<Ticker> processInput,
             IPublishOutput<PendingAssetCalculation> publishOutput,
-            IDbContextFactory<TrackerContext> dbContextFactory)
+            IMongoDatabaseFactory mongoDatabaseFactory)
         {
             _logger = logger;
             _processInput = processInput;
             _publishOutput = publishOutput;
-            _dbContextFactory = dbContextFactory;
+            _mongoDatabaseFactory = mongoDatabaseFactory;
         }
 
         public async Task ExecuteAsync(CancellationToken ct)
@@ -45,7 +44,7 @@ namespace CryptoManager.Net.Processor.Tickers
 
         private async Task ProcessAsync(PublishItem<Ticker> update)
         {
-            var context = _dbContextFactory.CreateDbContext();
+            var context = _mongoDatabaseFactory.CreateContext();
 
             var symbols = new List<ExchangeSymbol>(update.Data.Count());
             foreach (var item in update.Data)
@@ -88,20 +87,24 @@ namespace CryptoManager.Net.Processor.Tickers
 
             try
             {
-                await context.BulkUpdateAsync(symbols, new BulkConfig
+                var bulkOps = new List<WriteModel<ExchangeSymbol>>();
+                foreach (var symbol in symbols)
                 {
-                    PropertiesToInclude = [
-                        nameof(ExchangeSymbol.Id),
-                        nameof(ExchangeSymbol.ChangePercentage),
-                        nameof(ExchangeSymbol.LastPrice),
-                        nameof(ExchangeSymbol.HighPrice),
-                        nameof(ExchangeSymbol.LowPrice),
-                        nameof(ExchangeSymbol.Volume),
-                        nameof(ExchangeSymbol.QuoteVolume),
-                        nameof(ExchangeSymbol.UpdateTime)
-                    ],
-                    WithHoldlock = false
-                });
+                    var filter = Builders<ExchangeSymbol>.Filter.Eq(x => x.Id, symbol.Id);
+                    var updateDefinition = Builders<ExchangeSymbol>.Update
+                        .Set(x => x.ChangePercentage, symbol.ChangePercentage)
+                        .Set(x => x.LastPrice, symbol.LastPrice)
+                        .Set(x => x.HighPrice, symbol.HighPrice)
+                        .Set(x => x.LowPrice, symbol.LowPrice)
+                        .Set(x => x.Volume, symbol.Volume)
+                        .Set(x => x.QuoteVolume, symbol.QuoteVolume)
+                        .Set(x => x.UpdateTime, symbol.UpdateTime);
+
+                    bulkOps.Add(new UpdateOneModel<ExchangeSymbol>(filter, updateDefinition) { IsUpsert = true });
+                }
+
+                if (bulkOps.Any())
+                    await context.ExchangeSymbols.BulkWriteAsync(bulkOps);
             }
             catch(Exception ex)
             {

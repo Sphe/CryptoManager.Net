@@ -3,7 +3,7 @@ using CryptoManager.Net.Database;
 using CryptoManager.Net.Database.Models;
 using CryptoManager.Net.Models.Response;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
+using MongoDB.Driver;
 
 namespace CryptoManager.Net.Controllers
 {
@@ -14,7 +14,7 @@ namespace CryptoManager.Net.Controllers
         private readonly ILogger _logger;
         private int _maxSymbols;
 
-        public QuickViewController(ILogger<QuickViewController> logger, IConfiguration config, TrackerContext dbContext) : base(dbContext)
+        public QuickViewController(ILogger<QuickViewController> logger, IConfiguration config, MongoTrackerContext dbContext) : base(dbContext)
         {
             _logger = logger;
             _maxSymbols = config.GetValue<int?>("MaxQuickViewSymbols") ?? 8;
@@ -23,24 +23,27 @@ namespace CryptoManager.Net.Controllers
         [HttpGet]
         public async Task<ApiResult<IEnumerable<string>>> ListAsync()
         {
-            var result = await _dbContext.UserQuickViewConfigurations.Where(x => x.UserId == UserId).AsNoTracking().ToListAsync();
+            var filter = Builders<UserQuickViewConfiguration>.Filter.Eq(x => x.UserId, UserId);
+            var result = await _dbContext.UserQuickViewConfigurations.Find(filter).ToListAsync();
             return ApiResult<IEnumerable<string>>.Ok(result.Select(x => x.SymbolId));
         }
 
         [HttpPost]
         public async Task<ApiResult> AddSymbolAsync([FromBody]ApiQuickViewConfig request)
         {
-            var currentCount = await _dbContext.UserQuickViewConfigurations.Where(x => x.UserId == UserId).CountAsync();
+            var filter = Builders<UserQuickViewConfiguration>.Filter.Eq(x => x.UserId, UserId);
+            var currentCount = await _dbContext.UserQuickViewConfigurations.CountDocumentsAsync(filter);
             if (currentCount >= _maxSymbols)
                 return ApiResult.Error(ErrorType.Unknown, null, "Too many symbols");
 
-            _dbContext.Add(new UserQuickViewConfiguration
+            var newConfig = new UserQuickViewConfiguration
             {
+                Id = Guid.NewGuid().ToString(),
                 SymbolId = request.Symbol,
                 UserId = UserId
-            });
+            };
 
-            await _dbContext.SaveChangesAsync();
+            await _dbContext.UserQuickViewConfigurations.InsertOneAsync(newConfig);
 
             return ApiResult.Ok();
         }
@@ -49,13 +52,13 @@ namespace CryptoManager.Net.Controllers
         [HttpDelete("{symbolId}")]
         public async Task<ApiResult> RemoveSymbolAsync(string symbolId)
         {
-            var config = await _dbContext.UserQuickViewConfigurations.SingleOrDefaultAsync(x => x.UserId == UserId && x.SymbolId == symbolId);
-            if (config == null)
-                return ApiResult.Ok();
-
-            _dbContext.UserQuickViewConfigurations.Remove(config);
-            await _dbContext.SaveChangesAsync();
-
+            var filter = Builders<UserQuickViewConfiguration>.Filter.And(
+                Builders<UserQuickViewConfiguration>.Filter.Eq(x => x.UserId, UserId),
+                Builders<UserQuickViewConfiguration>.Filter.Eq(x => x.SymbolId, symbolId)
+            );
+            
+            var result = await _dbContext.UserQuickViewConfigurations.DeleteOneAsync(filter);
+            
             return ApiResult.Ok();
         }
     }

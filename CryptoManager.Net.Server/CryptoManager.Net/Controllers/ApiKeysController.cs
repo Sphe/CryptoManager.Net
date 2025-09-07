@@ -8,11 +8,14 @@ using CryptoManager.Net.Database;
 using CryptoManager.Net.Database.Models;
 using CryptoManager.Net.Models.Response;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
+using MongoDB.Driver;
 using System.Net;
 
 namespace CryptoManager.Net.Controllers
 {
+    /// <summary>
+    /// Controller for managing API keys for cryptocurrency exchanges
+    /// </summary>
     [ApiController]
     [Route("[controller]")]
     public class ApiKeysController : ApiController
@@ -20,20 +23,35 @@ namespace CryptoManager.Net.Controllers
         private readonly ILogger _logger;
         private readonly IExchangeUserClientProvider _clientProvider;
 
-        public ApiKeysController(ILogger<ApiKeysController> logger, TrackerContext dbContext, IExchangeUserClientProvider clientProvider): base(dbContext)
+        public ApiKeysController(ILogger<ApiKeysController> logger, MongoTrackerContext dbContext, IExchangeUserClientProvider clientProvider): base(dbContext)
         {
             _logger = logger;
             _clientProvider = clientProvider;
         }
 
+        /// <summary>
+        /// Gets a paginated list of API keys for the authenticated user
+        /// </summary>
+        /// <param name="page">Page number (default: 1)</param>
+        /// <param name="pageSize">Number of items per page (default: 10)</param>
+        /// <returns>A paginated list of API keys</returns>
+        /// <response code="200">Returns the list of API keys</response>
+        /// <response code="401">If the user is not authenticated</response>
         [HttpGet]
         public async Task<ApiResultPaged<IEnumerable<ApiApiKey>>> ListAsync(int page = 1, int pageSize = 10)
         {
-            var query = _dbContext.UserApiKeys.Where(x => x.UserId == UserId).OrderBy(x => x.Exchange);
+            var filter = Builders<UserApiKey>.Filter.Eq(x => x.UserId, UserId);
+            var sort = Builders<UserApiKey>.Sort.Ascending(x => x.Exchange);
 
-            var total = await query.CountAsync();
-            var keys = await query.Skip((page - 1) * pageSize).Take(pageSize).AsNoTracking().ToListAsync();
-            return ApiResultPaged<IEnumerable<ApiApiKey>>.Ok(page, pageSize, total, keys.Select(x => new ApiApiKey
+            var total = await _dbContext.UserApiKeys.CountDocumentsAsync(filter);
+            var keys = await _dbContext.UserApiKeys
+                .Find(filter)
+                .Sort(sort)
+                .Skip((page - 1) * pageSize)
+                .Limit(pageSize)
+                .ToListAsync();
+
+            return ApiResultPaged<IEnumerable<ApiApiKey>>.Ok(page, pageSize, (int)total, keys.Select(x => new ApiApiKey
             {
                 Id = x.Id,
                 Exchange = x.Exchange,
@@ -46,19 +64,30 @@ namespace CryptoManager.Net.Controllers
         [HttpGet("configured")]
         public async Task<ApiResult<string[]>> GetApiKeysConfiguredAsync()
         {
-            var query = await _dbContext.UserApiKeys.Where(x => x.UserId == UserId).OrderBy(x => x.Exchange).ToListAsync();
+            var filter = Builders<UserApiKey>.Filter.Eq(x => x.UserId, UserId);
+            var sort = Builders<UserApiKey>.Sort.Ascending(x => x.Exchange);
 
-            return ApiResult<string[]>.Ok(query.Select(x => x.Exchange).ToArray());
+            var query = await _dbContext.UserApiKeys
+                .Find(filter)
+                .Sort(sort)
+                .Project(x => x.Exchange)
+                .ToListAsync();
+
+            return ApiResult<string[]>.Ok(query.ToArray());
         }
 
         [HttpPost]
-        public async Task<ApiResult<int>> AddAsync(AddApiKeyRequest request)
+        public async Task<ApiResult<string>> AddAsync(AddApiKeyRequest request)
         {
-            var existingKey = await _dbContext.UserApiKeys.Where(x => x.UserId == UserId && x.Exchange == request.Exchange).AsNoTracking().SingleOrDefaultAsync();
+            var filter = Builders<UserApiKey>.Filter.And(
+                Builders<UserApiKey>.Filter.Eq(x => x.UserId, UserId),
+                Builders<UserApiKey>.Filter.Eq(x => x.Exchange, request.Exchange)
+            );
+            var existingKey = await _dbContext.UserApiKeys.Find(filter).FirstOrDefaultAsync();
             if (existingKey != null)
             {
                 _logger.LogDebug("Key already exists for user {User} on exchange {Exchange}", UserId, request.Exchange);
-                return ApiResult<int>.Error(ErrorType.InvalidOperation, null, $"Key already exists for for exchange {request.Exchange}");
+                return ApiResult<string>.Error(ErrorType.InvalidOperation, null, $"Key already exists for for exchange {request.Exchange}");
             }
 
             var secret = WebUtility.UrlDecode(request.Secret)
@@ -66,6 +95,7 @@ namespace CryptoManager.Net.Controllers
                 .Replace("\\n", "\n");
             var newKey = new UserApiKey
             {
+                Id = Guid.NewGuid().ToString(),
                 UserId = UserId,
                 Exchange = request.Exchange,
                 Environment = request.Environment ?? TradeEnvironmentNames.Live,
@@ -73,17 +103,20 @@ namespace CryptoManager.Net.Controllers
                 Secret = secret,
                 Pass = request.Pass
             };
-            _dbContext.UserApiKeys.Add(newKey);
-            await _dbContext.SaveChangesAsync();
+            await _dbContext.UserApiKeys.InsertOneAsync(newKey);
 
-            _clientProvider.ClearUserClients(UserId.ToString(), request.Exchange);            
-            return ApiResult<int>.Ok(newKey.Id);
+            _clientProvider.ClearUserClients(UserId, request.Exchange);            
+            return ApiResult<string>.Ok(newKey.Id);
         }
 
         [HttpPost("validate/{id}")]
-        public async Task<ApiResult<bool>> ValidateAsync(int id)
+        public async Task<ApiResult<bool>> ValidateAsync(string id)
         {
-            var existingKey = await _dbContext.UserApiKeys.Where(x => x.UserId == UserId && x.Id == id).SingleOrDefaultAsync();
+            var filter = Builders<UserApiKey>.Filter.And(
+                Builders<UserApiKey>.Filter.Eq(x => x.UserId, UserId),
+                Builders<UserApiKey>.Filter.Eq(x => x.Id, id)
+            );
+            var existingKey = await _dbContext.UserApiKeys.Find(filter).FirstOrDefaultAsync();
             if (existingKey == null)
             {
                 _logger.LogDebug("Key {id} not found for user {User}", id, UserId);
@@ -107,8 +140,8 @@ namespace CryptoManager.Net.Controllers
             var result = await balanceClient.GetBalancesAsync(new GetBalancesRequest());
             if (!result.Success)
             {
-                existingKey.Invalid = true;
-                await _dbContext.SaveChangesAsync();
+                var update = Builders<UserApiKey>.Update.Set(x => x.Invalid, true);
+                await _dbContext.UserApiKeys.UpdateOneAsync(filter, update);
                 return ApiResult<bool>.Error(new ApiError(ErrorType.Unauthorized, null, "Invalid credentials"));
             }
 
@@ -150,15 +183,14 @@ namespace CryptoManager.Net.Controllers
         }
 
         [HttpDelete("{id}")]
-        public async Task<ApiResult> DeleteAsync(int id)
+        public async Task<ApiResult> DeleteAsync(string id)
         {
-            var existingKey = await _dbContext.UserApiKeys.Where(x => x.UserId == UserId && x.Id == id).SingleOrDefaultAsync();
-            if (existingKey == null)
-                return ApiResult.Ok();
-
-            _dbContext.UserApiKeys.Remove(existingKey);
-            await _dbContext.SaveChangesAsync();
-
+            var filter = Builders<UserApiKey>.Filter.And(
+                Builders<UserApiKey>.Filter.Eq(x => x.UserId, UserId),
+                Builders<UserApiKey>.Filter.Eq(x => x.Id, id)
+            );
+            var result = await _dbContext.UserApiKeys.DeleteOneAsync(filter);
+            
             return ApiResult.Ok();
         }
     }

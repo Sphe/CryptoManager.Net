@@ -1,21 +1,20 @@
 ﻿using CryptoManager.Net.Database;
 using CryptoManager.Net.Database.Models;
 using CryptoManager.Net.Publish;
-using EFCore.BulkExtensions;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using MongoDB.Driver;
 
 namespace CryptoManager.Net.Analyzers
 {
     public class SymbolUsdVolumeService : IBackgroundService
     {
         private ILogger _logger;
-        private readonly IDbContextFactory<TrackerContext> _contextFactory;
+        private readonly IMongoDatabaseFactory _mongoDatabaseFactory;
 
-        public SymbolUsdVolumeService(ILogger<SymbolUsdVolumeService> logger, IDbContextFactory<TrackerContext> contextFactory)
+        public SymbolUsdVolumeService(ILogger<SymbolUsdVolumeService> logger, IMongoDatabaseFactory mongoDatabaseFactory)
         {
             _logger = logger;
-            _contextFactory = contextFactory;
+            _mongoDatabaseFactory = mongoDatabaseFactory;
         }
 
         public async Task ExecuteAsync(CancellationToken ct)
@@ -32,19 +31,25 @@ namespace CryptoManager.Net.Analyzers
         {
             try
             {
-                var context = _contextFactory.CreateDbContext();
+                var context = _mongoDatabaseFactory.CreateContext();
 
                 // Get fiat prices
-                var fiatPrices = await context.FiatPrices.ToListAsync();
+                var fiatPrices = await context.FiatPrices.Find(_ => true).ToListAsync();
 
                 // Get all symbols we need to process
-                var allSymbolVolumes = await context.Symbols.Select(x => new { x.Id, x.Exchange, x.QuoteAsset, x.QuoteVolume }).ToListAsync();
+                var allSymbolVolumes = await context.Symbols
+                    .Find(_ => true)
+                    .Project(x => new { x.Id, x.Exchange, x.QuoteAsset, x.QuoteVolume })
+                    .ToListAsync();
                 
                 // Get all exchange quote asset  prices
                 var quoteSymbols = allSymbolVolumes.GroupBy(x => new { x.Exchange, x.QuoteAsset }).Select(x => $"{x.Key.Exchange}-{x.Key.QuoteAsset}").ToList();
 
                 // Get all quote asset exchanges prices we need
-                var quoteSymbolPrices = await context.AssetStats.Where(x => quoteSymbols.Contains(x.Id)).Select(x => new { x.Id, x.Value }).ToListAsync();
+                var quoteSymbolPrices = await context.ExchangeAssetStats
+                    .Find(x => quoteSymbols.Contains(x.Id))
+                    .Project(x => new { x.Id, x.Value })
+                    .ToListAsync();
 
                 var data = new List<ExchangeSymbol>(allSymbolVolumes.Count);
                 foreach(var symbol in allSymbolVolumes)
@@ -78,16 +83,20 @@ namespace CryptoManager.Net.Analyzers
                     });
                 }
 
-                await context.BulkInsertOrUpdateAsync(data, new BulkConfig
+                // Bulk upsert using MongoDB
+                var bulkOps = new List<WriteModel<ExchangeSymbol>>();
+                foreach (var symbol in data)
                 {
-                    PropertiesToInclude = new List<string>
-                    {
-                        nameof(ExchangeSymbol.Id),
-                        nameof(ExchangeSymbol.UsdVolume),
-                        nameof(ExchangeSymbol.UpdateTime)
-                    },
-                    WithHoldlock = false
-                });
+                    var filter = Builders<ExchangeSymbol>.Filter.Eq(x => x.Id, symbol.Id);
+                    var update = Builders<ExchangeSymbol>.Update
+                        .Set(x => x.UsdVolume, symbol.UsdVolume)
+                        .Set(x => x.UpdateTime, symbol.UpdateTime);
+
+                    bulkOps.Add(new UpdateOneModel<ExchangeSymbol>(filter, update) { IsUpsert = true });
+                }
+
+                if (bulkOps.Any())
+                    await context.Symbols.BulkWriteAsync(bulkOps);
             }
             catch (Exception ex)
             {

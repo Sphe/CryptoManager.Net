@@ -5,10 +5,14 @@ using CryptoExchange.Net.Objects.Errors;
 using CryptoExchange.Net.Objects.Sockets;
 using CryptoExchange.Net.SharedApis;
 using CryptoManager.Net.Data;
+using CryptoManager.Net.Database;
+using CryptoManager.Net.Database.Models;
 using CryptoManager.Net.Models;
 using CryptoManager.Net.Publish;
+using CryptoManager.Net.Services.External;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using MongoDB.Driver;
 using System.Diagnostics;
 
 namespace CryptoManager.Net.Publisher.Tickers
@@ -20,6 +24,10 @@ namespace CryptoManager.Net.Publisher.Tickers
         private readonly IExchangeRestClient _restClient;
         private readonly IExchangeSocketClient _socketClient;
         private readonly IPublishOutput<Ticker> _publishOutput;
+        private readonly IPublishOutput<PendingAssetCalculation> _assetCalculationOutput;
+        private readonly IPublishOutput<PendingSolanaAssetCalculation> _solanaAssetCalculationOutput;
+        private readonly IJupiterTokenService _jupiterTokenService;
+        private readonly IMongoDatabaseFactory _mongoDatabaseFactory;
         private readonly double _pollInterval;
         private readonly DataBatcher<Ticker> _tickerBatcher;
         private readonly Dictionary<string, SharedSpotSymbol[]> _symbols = new Dictionary<string, SharedSpotSymbol[]>();
@@ -32,12 +40,20 @@ namespace CryptoManager.Net.Publisher.Tickers
             IConfiguration configuration,
             IExchangeRestClient restClient,
             IExchangeSocketClient socketClient,
-            IPublishOutput<Ticker> publishOutput)
+            IPublishOutput<Ticker> publishOutput,
+            IPublishOutput<PendingAssetCalculation> assetCalculationOutput,
+            IPublishOutput<PendingSolanaAssetCalculation> solanaAssetCalculationOutput,
+            IJupiterTokenService jupiterTokenService,
+            IMongoDatabaseFactory mongoDatabaseFactory)
         {
             _logger = logger;
             _restClient = restClient;
             _socketClient = socketClient;
             _publishOutput = publishOutput;
+            _assetCalculationOutput = assetCalculationOutput;
+            _solanaAssetCalculationOutput = solanaAssetCalculationOutput;
+            _jupiterTokenService = jupiterTokenService;
+            _mongoDatabaseFactory = mongoDatabaseFactory;
 
             _pollInterval = configuration.GetValue<double?>("TickersPollInterval") ?? 0.16;
             _enabledExchanges = configuration.GetValue<string?>("EnabledExchanges")?.Split(";");
@@ -95,11 +111,155 @@ namespace CryptoManager.Net.Publisher.Tickers
             // Poll symbols on interval so we know which ones are no longer support
             while (!_stoppingToken.IsCancellationRequested)
             {
-                var results = await _restClient.GetSpotSymbolsAsync(new GetSymbolsRequest(), _enabledExchanges);
-                foreach (var result in results.Where(x => x.Success))
-                    _symbols[result.Exchange] = result.Data;
+                try
+                {
+                    // Get verified tokens from Jupiter
+                    var jupiterTokens = await _jupiterTokenService.GetVerifiedTokensAsync(_stoppingToken);
+                    var jupiterSymbols = jupiterTokens.Select(t => t.Symbol).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    
+                    _logger.LogInformation("TickerPublishService loaded {Count} verified Jupiter tokens for filtering", jupiterSymbols.Count);
 
-                _symbolsInitialSetEvent.Set();
+                    var results = await _restClient.GetSpotSymbolsAsync(new GetSymbolsRequest(), _enabledExchanges);
+
+                    foreach (var result in results.Where(x => x.Success))
+                    {
+                        // Get existing symbols for this exchange from database
+                        var context = _mongoDatabaseFactory.CreateContext();
+                        var existingSymbolIds = await context.ExchangeAssetStats
+                            .Find(x => x.Exchange == result.Exchange)
+                            .Project(x => x.Id)
+                            .ToListAsync();
+                        
+                        var existingSymbolsSet = existingSymbolIds.ToHashSet();
+                        
+                        // Filter to only new symbols that haven't been seen before
+                        var newSymbols = result.Data.Where(s => 
+                        {
+                            var symbolId = $"{result.Exchange}-{s.BaseAsset}";
+                            return !existingSymbolsSet.Contains(symbolId);
+                        }).ToArray();
+                        
+                        var existingSymbols = result.Data.Where(s => 
+                        {
+                            var symbolId = $"{result.Exchange}-{s.BaseAsset}";
+                            return existingSymbolsSet.Contains(symbolId);
+                        }).ToArray();
+                        
+                        _logger.LogInformation("TickerPublishService found {NewCount} new symbols and {ExistingCount} existing symbols for {Exchange}", 
+                            newSymbols.Length, existingSymbols.Length, result.Exchange);
+                        
+                        List<SymbolValidationResult> validationResults = new();
+                        List<SharedSpotSymbol> allValidatedSymbols = new();
+                        List<SharedSpotSymbol> allNonValidatedSymbols = new();
+                        
+                        // Only validate new symbols
+                        if (newSymbols.Any())
+                        {
+                            validationResults = (await ValidateSymbolsWithPriceAsync(result.Exchange, newSymbols, jupiterTokens)).ToList();
+                            
+                            // Separate validated and non-validated symbols
+                            var validatedSymbols = validationResults.Where(r => r.IsValidated).Select(r => r.Symbol).ToArray();
+                            var nonValidatedSymbols = validationResults.Where(r => !r.IsValidated).Select(r => r.Symbol).ToArray();
+                            
+                            allValidatedSymbols.AddRange(validatedSymbols);
+                            allNonValidatedSymbols.AddRange(nonValidatedSymbols);
+                            
+                            // Publish Solana asset calculations for validated new symbols
+                            var solanaAssetCalculations = validationResults
+                                .Where(r => r.IsValidated)
+                                .Select(r => new PendingSolanaAssetCalculation
+                                {
+                                    Exchange = result.Exchange,
+                                    Asset = r.Symbol.BaseAsset,
+                                    Blockchains = r.Blockchains,
+                                    ContractAddresses = r.ContractAddresses,
+                                    JupiterPrice = r.JupiterPrice,
+                                    ExchangePrice = r.ExchangePrice,
+                                    PriceDifference = r.PriceDifference
+                                })
+                                .ToList();
+                            
+                            if (solanaAssetCalculations.Any())
+                            {
+                                await _solanaAssetCalculationOutput.PublishAsync(new PublishItem<PendingSolanaAssetCalculation>
+                                {
+                                    Data = solanaAssetCalculations
+                                });
+                            }
+                            
+                            // Publish regular asset calculations for non-validated new symbols
+                            var regularAssetCalculations = nonValidatedSymbols
+                                .Select(s => new PendingAssetCalculation
+                                {
+                                    Exchange = result.Exchange,
+                                    Asset = s.BaseAsset
+                                })
+                                .ToList();
+                            
+                            if (regularAssetCalculations.Any())
+                            {
+                                await _assetCalculationOutput.PublishAsync(new PublishItem<PendingAssetCalculation>
+                                {
+                                    Data = regularAssetCalculations
+                                });
+                            }
+                        }
+                        
+                        // For existing symbols, we need to determine their validation status from the database
+                        if (existingSymbols.Any())
+                        {
+                            var existingSolanaSymbols = await context.ExchangeAssetStats
+                                .Find(x => x.Exchange == result.Exchange && x.Blockchains.Contains("solana"))
+                                .Project(x => x.Asset)
+                                .ToListAsync();
+                            
+                            var existingSolanaSet = existingSolanaSymbols.ToHashSet(StringComparer.OrdinalIgnoreCase);
+                            
+                            // Add existing symbols to the appropriate lists based on their blockchain type
+                            foreach (var symbol in existingSymbols)
+                            {
+                                if (existingSolanaSet.Contains(symbol.BaseAsset))
+                                {
+                                    allValidatedSymbols.Add(symbol);
+                                }
+                                else
+                                {
+                                    allNonValidatedSymbols.Add(symbol);
+                                }
+                            }
+                        }
+                        
+                        _symbols[result.Exchange] = allValidatedSymbols.ToArray();
+                        
+                        // Remove obsolete symbols that are no longer returned by the exchange
+                        var currentSymbolIds = result.Data.Select(s => $"{result.Exchange}-{s.BaseAsset}").ToHashSet();
+                        var obsoleteSymbolIds = existingSymbolsSet.Except(currentSymbolIds).ToList();
+                        
+                        if (obsoleteSymbolIds.Any())
+                        {
+                            var deleteResult = await context.ExchangeAssetStats.DeleteManyAsync(
+                                Builders<ExchangeAssetStats>.Filter.In(x => x.Id, obsoleteSymbolIds)
+                            );
+                            
+                            _logger.LogInformation("TickerPublishService removed {ObsoleteCount} obsolete symbols from {Exchange}: {ObsoleteSymbols}", 
+                                deleteResult.DeletedCount, result.Exchange, string.Join(", ", obsoleteSymbolIds.Take(10)));
+                        }
+                        
+                        _logger.LogInformation("TickerPublishService processed {NewValidatedCount} new validated, {NewNonValidatedCount} new non-validated, {ExistingCount} existing, and removed {ObsoleteCount} obsolete symbols for {Exchange}", 
+                            validationResults.Count(r => r.IsValidated), 
+                            validationResults.Count(r => !r.IsValidated), 
+                            existingSymbols.Length, 
+                            obsoleteSymbolIds.Count,
+                            result.Exchange);
+                    }
+
+                    _symbolsInitialSetEvent.Set();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "TickerPublishService error in PollSymbolsAsync, will retry in next cycle");
+                }
+
                 try { await Task.Delay(TimeSpan.FromMinutes(15), _stoppingToken); } catch { }
             }
         }
@@ -175,7 +335,7 @@ namespace CryptoManager.Net.Publisher.Tickers
                     await subResult.Data.CloseAsync();
                     var validSymbols = GetValidSymbols(tickerClient.Exchange, symbols);
 
-#warning if this fails there is no backup to get the tickers up and running again
+                    // TODO: if this fails there is no backup to get the tickers up and running again
                     var result = await SubscribeToTickersAsync(tickerClient, validSymbols);
                     if (!result)
                         _logger.LogError($"TickerPublishService resubscribing symbols failed; dropped symbols: [{string.Join(", ", symbols.Select(x => x.Name).Except(validSymbols.Select(x => x.Name)))}]");
@@ -201,7 +361,7 @@ namespace CryptoManager.Net.Publisher.Tickers
             if (@event.Data.SharedSymbol == null)
                 return;
 
-            data.Add(@event.Data.Symbol, ParseTicker(@event.Exchange, @event.Data));
+            data.Add(@event.Exchange + @event.Data.Symbol, ParseTicker(@event.Exchange, @event.Data));
             _ = _tickerBatcher.AddAsync(data);
         }
 
@@ -214,10 +374,10 @@ namespace CryptoManager.Net.Publisher.Tickers
                 if (symbol.SharedSymbol == null)
                     continue;
 
-                data.Add(symbol.Symbol, ParseTicker(@event.Exchange, symbol));
+                data.Add(@event.Exchange + symbol.Symbol, ParseTicker(@event.Exchange, symbol));
             }
 
-#warning todo
+            // TODO: Handle ticker batching properly
             _ = _tickerBatcher.AddAsync(data);
         }
 
@@ -241,7 +401,7 @@ namespace CryptoManager.Net.Publisher.Tickers
                     if (symbol.SharedSymbol == null)
                         continue;
 
-                    data.Add(symbol.Symbol, ParseTicker(result.Exchange, symbol));
+                    data.Add(result.Exchange + symbol.Symbol, ParseTicker(result.Exchange, symbol));
                 }
                 _ = _tickerBatcher.AddAsync(data);
             }
@@ -262,6 +422,183 @@ namespace CryptoManager.Net.Publisher.Tickers
                 Volume = ticker.Volume,
                 QuoteVolume = ticker.QuoteVolume
             };
+        }
+
+        /// <summary>
+        /// Validates symbols by comparing exchange prices with Jupiter prices
+        /// </summary>
+        private async Task<IEnumerable<SymbolValidationResult>> ValidateSymbolsWithPriceAsync(
+            string exchange, 
+            SharedSpotSymbol[] symbols, 
+            IEnumerable<JupiterToken> jupiterTokens)
+        {
+            var validationResults = new List<SymbolValidationResult>();
+            var jupiterTokenDict = jupiterTokens
+                .GroupBy(t => t.Symbol, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+            
+            // Process symbols in batches to avoid overwhelming the APIs
+            var symbolBatches = symbols.Chunk(10);
+            
+            foreach (var batch in symbolBatches)
+            {
+                var batchTasks = batch.Select(async symbol =>
+                {
+                    try
+                    {
+                        // Check if symbol is in Jupiter verified tokens
+                        if (!jupiterTokenDict.TryGetValue(symbol.BaseAsset, out var jupiterToken))
+                        {
+                            return new SymbolValidationResult
+                            {
+                                Symbol = symbol,
+                                Blockchains = new[] { "other" },
+                                ContractAddresses = Array.Empty<ContractAddress>(),
+                                IsValidated = false
+                            };
+                        }
+
+                        // Get exchange book ticker price
+                        var sharedSymbol = new SharedSymbol(TradingMode.Spot, symbol.BaseAsset, symbol.QuoteAsset, symbol.Name);
+                        var bookTickerRequest = new GetBookTickerRequest(sharedSymbol);
+                        var bookTickerResult = await _restClient.GetBookTickerAsync(exchange, bookTickerRequest);
+                        if (!bookTickerResult.Success || bookTickerResult.Data == null)
+                        {
+                            _logger.LogDebug("Failed to get book ticker for {Symbol} on {Exchange}", symbol.Name, exchange);
+                            return new SymbolValidationResult
+                            {
+                                Symbol = symbol,
+                                Blockchains = new[] { "other" },
+                                ContractAddresses = Array.Empty<ContractAddress>(),
+                                IsValidated = false
+                            };
+                        }
+
+                        var exchangePrice = (bookTickerResult.Data.BestBidPrice + bookTickerResult.Data.BestAskPrice) / 2;
+                        if (exchangePrice <= 0)
+                        {
+                            _logger.LogDebug("Invalid exchange price for {Symbol} on {Exchange}: {Price}", symbol.Name, exchange, exchangePrice);
+                            return new SymbolValidationResult
+                            {
+                                Symbol = symbol,
+                                Blockchains = new[] { "other" },
+                                ContractAddresses = Array.Empty<ContractAddress>(),
+                                ExchangePrice = exchangePrice,
+                                IsValidated = false
+                            };
+                        }
+
+                        // Get Jupiter price
+                        var jupiterPrice = await _jupiterTokenService.GetTokenPriceAsync(jupiterToken.Address, _stoppingToken);
+                        if (jupiterPrice == null)
+                        {
+                            _logger.LogDebug("Failed to get Jupiter price for {Symbol} (address: {Address})", symbol.Name, jupiterToken.Address);
+                            return new SymbolValidationResult
+                            {
+                                Symbol = symbol,
+                                Blockchains = new[] { "other" },
+                                ContractAddresses = Array.Empty<ContractAddress>(),
+                                ExchangePrice = exchangePrice,
+                                IsValidated = false
+                            };
+                        }
+
+                        var jupiterUsdPrice = jupiterPrice.UsdPrice;
+                        if (jupiterUsdPrice <= 0)
+                        {
+                            _logger.LogDebug("Invalid Jupiter price for {Symbol}: {Price}", symbol.Name, jupiterUsdPrice);
+                            return new SymbolValidationResult
+                            {
+                                Symbol = symbol,
+                                Blockchains = new[] { "other" },
+                                ContractAddresses = Array.Empty<ContractAddress>(),
+                                ExchangePrice = exchangePrice,
+                                JupiterPrice = jupiterUsdPrice,
+                                IsValidated = false
+                            };
+                        }
+
+                        // Convert exchange price to USD if needed
+                        var exchangeUsdPrice = exchangePrice;
+                        if (symbol.QuoteAsset != "USDT" && symbol.QuoteAsset != "USDC" && symbol.QuoteAsset != "USD")
+                        {
+                            // Get quote currency price in USD
+                            var quoteTokenPrice = await _jupiterTokenService.GetTokenPriceAsync(symbol.QuoteAsset, _stoppingToken);
+                            if (quoteTokenPrice != null && quoteTokenPrice.UsdPrice > 0)
+                            {
+                                exchangeUsdPrice = exchangePrice * quoteTokenPrice.UsdPrice;
+                            }
+                            else
+                            {
+                                _logger.LogDebug("Could not convert {QuoteAsset} to USD for {Symbol}, skipping price validation", symbol.QuoteAsset, symbol.Name);
+                                return new SymbolValidationResult
+                                {
+                                    Symbol = symbol,
+                                    Blockchains = new[] { "other" },
+                                    ContractAddresses = Array.Empty<ContractAddress>(),
+                                    ExchangePrice = exchangePrice,
+                                    JupiterPrice = jupiterUsdPrice,
+                                    IsValidated = false
+                                };
+                            }
+                        }
+
+                        // Calculate price difference percentage
+                        var priceDifference = Math.Abs(exchangeUsdPrice - jupiterUsdPrice) / jupiterUsdPrice * 100;
+                        
+                        // Check if prices are within 10% tolerance
+                        if (priceDifference <= 10.0m)
+                        {
+                            _logger.LogDebug("Price validation passed for {Symbol}: Exchange={ExchangePrice:F6} ({QuoteAsset}), ExchangeUSD={ExchangeUsdPrice:F6}, Jupiter={JupiterPrice:F6}, Diff={Difference:F2}%", 
+                                symbol.Name, exchangePrice, symbol.QuoteAsset, exchangeUsdPrice, jupiterUsdPrice, priceDifference);
+                            return new SymbolValidationResult
+                            {
+                                Symbol = symbol,
+                                Blockchains = new[] { "solana" },
+                                ContractAddresses = new[] { new ContractAddress { Network = "solana", Address = jupiterToken.Address } },
+                                ExchangePrice = exchangeUsdPrice,
+                                JupiterPrice = jupiterUsdPrice,
+                                PriceDifference = priceDifference,
+                                IsValidated = true
+                            };
+                        }
+                        else
+                        {
+                            _logger.LogDebug("Price validation failed for {Symbol}: Exchange={ExchangePrice:F6} ({QuoteAsset}), ExchangeUSD={ExchangeUsdPrice:F6}, Jupiter={JupiterPrice:F6}, Diff={Difference:F2}%", 
+                                symbol.Name, exchangePrice, symbol.QuoteAsset, exchangeUsdPrice, jupiterUsdPrice, priceDifference);
+                            return new SymbolValidationResult
+                            {
+                                Symbol = symbol,
+                                Blockchains = new[] { "other" },
+                                ContractAddresses = Array.Empty<ContractAddress>(),
+                                ExchangePrice = exchangeUsdPrice,
+                                JupiterPrice = jupiterUsdPrice,
+                                PriceDifference = priceDifference,
+                                IsValidated = false
+                            };
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Error validating symbol {Symbol} on {Exchange}", symbol.Name, exchange);
+                        return new SymbolValidationResult
+                        {
+                            Symbol = symbol,
+                            Blockchains = new[] { "other" },
+                            ContractAddresses = Array.Empty<ContractAddress>(),
+                            IsValidated = false
+                        };
+                    }
+                });
+
+                var batchResults = await Task.WhenAll(batchTasks);
+                validationResults.AddRange(batchResults);
+                
+                // Small delay between batches to avoid rate limiting
+                await Task.Delay(100, _stoppingToken);
+            }
+
+            return validationResults;
         }
     }
 }

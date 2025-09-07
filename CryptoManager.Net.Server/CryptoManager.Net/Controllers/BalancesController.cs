@@ -8,9 +8,9 @@ using CryptoManager.Net.Database.Models;
 using CryptoManager.Net.Database.Projections;
 using CryptoManager.Net.Models.Requests;
 using CryptoManager.Net.Models.Response;
-using EFCore.BulkExtensions;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
+using MongoDB.Driver;
+using MongoDB.Bson;
 using System.Linq.Expressions;
 
 namespace CryptoManager.Net.Controllers
@@ -27,7 +27,7 @@ namespace CryptoManager.Net.Controllers
         public BalancesController(
             ILogger<BalancesController> logger, 
             IExchangeUserClientProvider clientProvider,
-            TrackerContext dbContext) : base(dbContext) 
+            MongoTrackerContext dbContext) : base(dbContext) 
         {
             _logger = logger;
             _clientProvider = clientProvider;
@@ -43,12 +43,15 @@ namespace CryptoManager.Net.Controllers
             int page = 1,
             int pageSize = 20)
         {
-            var dbQuery = _dbContext.UserExchangeBalances(UserId, exchange);
+            var data = await _dbContext.UserExchangeBalances(int.Parse(UserId), exchange);
+            
+            var filteredData = data.AsQueryable();
+            
             if (!string.IsNullOrEmpty(query))
-                dbQuery = dbQuery.Where(x => x.Asset.Contains(query));
+                filteredData = filteredData.Where(x => x.Asset.Contains(query));
 
             if (!string.IsNullOrEmpty(asset))
-                dbQuery = dbQuery.Where(x => x.Asset == asset);
+                filteredData = filteredData.Where(x => x.Asset == asset);
 
             if (string.IsNullOrEmpty(orderBy))
                 orderBy = nameof(ApiBalance.UsdValue);
@@ -63,13 +66,13 @@ namespace CryptoManager.Net.Controllers
                 _ => throw new ArgumentException(),
             };
 
-            dbQuery = orderDirection == OrderDirection.Ascending
-                ? dbQuery.OrderBy(order)
-                : dbQuery.OrderByDescending(order);
+            filteredData = orderDirection == OrderDirection.Ascending
+                ? filteredData.OrderBy(order)
+                : filteredData.OrderByDescending(order);
 
-            var total = await dbQuery.CountAsync();
-            var x = dbQuery.Skip((page - 1) * pageSize).Take(pageSize).ToQueryString();
-            var pageData = await dbQuery.Skip((page - 1) * pageSize).Take(pageSize).ToListAsync();
+            var total = filteredData.Count();
+            var pageData = filteredData.Skip((page - 1) * pageSize).Take(pageSize).ToList();
+            
             return ApiResultPaged<IEnumerable<ApiBalance>>.Ok(page, pageSize, total, pageData.Select(x => new ApiBalance
             {
                 Exchange = x.Exchange,
@@ -88,9 +91,12 @@ namespace CryptoManager.Net.Controllers
             int page = 1,
             int pageSize = 20)
         {
-            var dbQuery = _dbContext.UserExternalBalances(UserId);
+            var data = await _dbContext.UserExternalBalances(int.Parse(UserId));
+            
+            var filteredData = data.AsQueryable();
+            
             if (!string.IsNullOrEmpty(query))
-                dbQuery = dbQuery.Where(x => x.Asset.Contains(query));
+                filteredData = filteredData.Where(x => x.Asset.Contains(query));
 
             if (string.IsNullOrEmpty(orderBy))
                 orderBy = nameof(ApiBalance.UsdValue);
@@ -103,13 +109,13 @@ namespace CryptoManager.Net.Controllers
                 _ => throw new ArgumentException(),
             };
 
-            dbQuery = orderDirection == OrderDirection.Ascending
-                ? dbQuery.OrderBy(order)
-                : dbQuery.OrderByDescending(order);
+            filteredData = orderDirection == OrderDirection.Ascending
+                ? filteredData.OrderBy(order)
+                : filteredData.OrderByDescending(order);
 
-            var total = await dbQuery.CountAsync();
-            var x = dbQuery.Skip((page - 1) * pageSize).Take(pageSize).ToQueryString();
-            var pageData = await dbQuery.Skip((page - 1) * pageSize).Take(pageSize).ToListAsync();
+            var total = filteredData.Count();
+            var pageData = filteredData.Skip((page - 1) * pageSize).Take(pageSize).ToList();
+            
             return ApiResultPaged<IEnumerable<ApiBalance>>.Ok(page, pageSize, total, pageData.Select(x => new ApiBalance
             {
                 Id = x.Id,
@@ -122,8 +128,11 @@ namespace CryptoManager.Net.Controllers
         [HttpGet("valuation")]
         public async Task<ApiResult<ApiBalanceValuation>> GetValueAsync(string? exchange = null)
         {
-            var exchangeValue = await _dbContext.UserExchangeBalances(UserId, exchange).SumAsync(x => x.UsdValue);
-            var externalValue = await _dbContext.UserExternalBalances(UserId).SumAsync(x => x.UsdValue);
+            var exchangeData = await _dbContext.UserExchangeBalances(int.Parse(UserId), exchange);
+            var externalData = await _dbContext.UserExternalBalances(int.Parse(UserId));
+            
+            var exchangeValue = exchangeData.Sum(x => x.UsdValue);
+            var externalValue = externalData.Sum(x => x.UsdValue);
 
             return ApiResult<ApiBalanceValuation>.Ok(new ApiBalanceValuation
             {
@@ -137,46 +146,66 @@ namespace CryptoManager.Net.Controllers
         public async Task<ApiResult<IEnumerable<ApiUserHistoryItem>>> GetHistoryAsync(string period)
         {
             List<UserValuation> data;
+            var filter = Builders<UserValuation>.Filter.And(
+                Builders<UserValuation>.Filter.Eq(x => x.UserId, UserId)
+            );
+
             if (period == "1w")
             {
                 // One week, return one point per day
                 var compareTime = DateTime.UtcNow.AddDays(-8);
-                data = await _dbContext.UserValuations
-                    .Where(x => x.UserId == UserId && x.Timestamp > compareTime)
-                    .OrderBy(x => x.Timestamp)
-                    .GroupBy(x => x.Timestamp.Day)
-                    .Select(x => x.First())
-                    .ToListAsync();
+                filter = Builders<UserValuation>.Filter.And(filter, Builders<UserValuation>.Filter.Gt(x => x.Timestamp, compareTime));
+                
+                var pipeline = new List<BsonDocument>
+                {
+                    new BsonDocument("$match", new BsonDocument
+                    {
+                        { "userId", UserId },
+                        { "timestamp", new BsonDocument("$gt", compareTime) }
+                    }),
+                    new BsonDocument("$addFields", new BsonDocument("day", new BsonDocument("$dayOfYear", "$timestamp"))),
+                    new BsonDocument("$sort", new BsonDocument("timestamp", 1)),
+                    new BsonDocument("$group", new BsonDocument
+                    {
+                        { "_id", "$day" },
+                        { "first", new BsonDocument("$first", "$$ROOT") }
+                    }),
+                    new BsonDocument("$replaceRoot", new BsonDocument("newRoot", "$first"))
+                };
+
+                data = await _dbContext.UserValuations.Aggregate<UserValuation>(pipeline).ToListAsync();
             }
             else if (period == "1m")
             {
                 // One month, return one point per 3 days
                 var compareTime = DateTime.UtcNow.AddDays(-31);
                 var allData = await _dbContext.UserValuations
-                    .Where(x => x.UserId == UserId && x.Timestamp > compareTime)
-                    .GroupBy(x => x.Timestamp.Day)
-                    .Select(x => x.First())
+                    .Find(Builders<UserValuation>.Filter.And(
+                        Builders<UserValuation>.Filter.Eq(x => x.UserId, UserId),
+                        Builders<UserValuation>.Filter.Gt(x => x.Timestamp, compareTime)
+                    ))
+                    .Sort(Builders<UserValuation>.Sort.Ascending(x => x.Timestamp))
                     .ToListAsync();
 
-                var orderedData = allData.OrderBy(x => x.Timestamp).ToList();
-
                 data = new List<UserValuation>();
-                for(var i = orderedData.Count - 1; i >= 0; i -= 3)                
-                    data.Add(orderedData[i]);                
+                for(var i = allData.Count - 1; i >= 0; i -= 3)                
+                    data.Add(allData[i]);                
             }
             else
             {
                 // One year, return one point per month
                 var compareTime = DateTime.UtcNow.AddDays(-366);
                 var allData = await _dbContext.UserValuations
-                    .Where(x => x.UserId == UserId && x.Timestamp > compareTime)
-                    .GroupBy(x => x.Timestamp.Day)
-                    .Select(x => x.First())
+                    .Find(Builders<UserValuation>.Filter.And(
+                        Builders<UserValuation>.Filter.Eq(x => x.UserId, UserId),
+                        Builders<UserValuation>.Filter.Gt(x => x.Timestamp, compareTime)
+                    ))
+                    .Sort(Builders<UserValuation>.Sort.Ascending(x => x.Timestamp))
                     .ToListAsync();
 
                 var lastMonth = -1;
                 data = new List<UserValuation>();
-                foreach(var item in allData.OrderBy(x => x.Timestamp))
+                foreach(var item in allData)
                 {
                     if (item.Timestamp.Month != lastMonth)
                     {
@@ -196,8 +225,11 @@ namespace CryptoManager.Net.Controllers
         [HttpGet("assets")]
         public async Task<ApiResult<IEnumerable<ApiAssetBalance>>> GetUserAssetsAsync(int amount = 10)
         {
-            var dataExchange = await _dbContext.UserTotalExchangeAssetBalances(UserId).OrderByDescending(x => x.UsdValue).Take(amount).ToListAsync();
-            var dataExternal = await _dbContext.UserExternalBalances(UserId).OrderByDescending(x => x.UsdValue).Take(amount).ToListAsync();
+            var exchangeData = await _dbContext.UserTotalExchangeAssetBalances(int.Parse(UserId));
+            var externalData = await _dbContext.UserExternalBalances(int.Parse(UserId));
+            
+            var dataExchange = exchangeData.OrderByDescending(x => x.UsdValue).Take(amount).ToList();
+            var dataExternal = externalData.OrderByDescending(x => x.UsdValue).Take(amount).ToList();
 
             var result = new List<ApiAssetBalance>();
             foreach (var item in dataExchange)
@@ -221,32 +253,41 @@ namespace CryptoManager.Net.Controllers
         [HttpPost("external")]
         public async Task<ApiResult> UpdateExternalBalanceAsync([FromBody] UpdateExternalBalanceRequest request)
         {
-            var existingBalance = await _dbContext.UserExternalBalances.SingleOrDefaultAsync(x => x.UserId == UserId && x.Asset == request.Asset);
+            var filter = Builders<UserExternalBalance>.Filter.And(
+                Builders<UserExternalBalance>.Filter.Eq(x => x.UserId, UserId),
+                Builders<UserExternalBalance>.Filter.Eq(x => x.Asset, request.Asset)
+            );
+            
+            var existingBalance = await _dbContext.UserExternalBalances.Find(filter).FirstOrDefaultAsync();
             if (existingBalance == null)
             {
                 existingBalance = new UserExternalBalance()
                 {
                     Id = $"{UserId}-{request.Asset}",
                     Asset = request.Asset,
-                    UserId = UserId
+                    UserId = UserId,
+                    Total = request.Total
                 };
-                _dbContext.UserExternalBalances.Add(existingBalance);
+                await _dbContext.UserExternalBalances.InsertOneAsync(existingBalance);
+            }
+            else
+            {
+                var update = Builders<UserExternalBalance>.Update.Set(x => x.Total, request.Total);
+                await _dbContext.UserExternalBalances.UpdateOneAsync(filter, update);
             }
 
-            existingBalance.Total = request.Total;
-            await _dbContext.SaveChangesAsync();
             return ApiResult.Ok();
         }
 
         [HttpDelete("external/{id}")]
         public async Task<ApiResult> DeleteExternalBalanceAsync(string id)
         {
-            var existingBalance = await _dbContext.UserExternalBalances.SingleOrDefaultAsync(x => x.UserId == UserId && x.Id == id);
-            if (existingBalance == null)
-                return ApiResult.Ok();
-
-            _dbContext.UserExternalBalances.Remove(existingBalance);
-            await _dbContext.SaveChangesAsync();
+            var filter = Builders<UserExternalBalance>.Filter.And(
+                Builders<UserExternalBalance>.Filter.Eq(x => x.UserId, UserId),
+                Builders<UserExternalBalance>.Filter.Eq(x => x.Id, id)
+            );
+            
+            await _dbContext.UserExternalBalances.DeleteOneAsync(filter);
             return ApiResult.Ok();
         }
 
@@ -256,7 +297,17 @@ namespace CryptoManager.Net.Controllers
             if (!await CheckUserUpdateTopicAsync(UserUpdateType.Balances))
                 return ApiResult.Ok();
 
-            var apiKeys = await _dbContext.UserApiKeys.Where(x => x.UserId == UserId && !x.Invalid && exchange == null ? true : x.Exchange == exchange).ToListAsync();
+            var apiKeyFilter = Builders<UserApiKey>.Filter.And(
+                Builders<UserApiKey>.Filter.Eq(x => x.UserId, UserId),
+                Builders<UserApiKey>.Filter.Eq(x => x.Invalid, false)
+            );
+            
+            if (!string.IsNullOrEmpty(exchange))
+            {
+                apiKeyFilter = Builders<UserApiKey>.Filter.And(apiKeyFilter, Builders<UserApiKey>.Filter.Eq(x => x.Exchange, exchange));
+            }
+            
+            var apiKeys = await _dbContext.UserApiKeys.Find(apiKeyFilter).ToListAsync();
             if (!string.IsNullOrEmpty(exchange) && !apiKeys.Any())
                 return ApiResult.Error(ApiErrors.NoApiKeyConfigured);
 
@@ -280,7 +331,7 @@ namespace CryptoManager.Net.Controllers
                 }));
             }
 
-            await _dbContext.BulkInsertOrUpdateAsync(dbBalances, new BulkConfig { WithHoldlock = false });
+            await _dbContext.BulkInsertOrUpdateAsync(dbBalances);
             return ApiResult.Ok();
         }
     }

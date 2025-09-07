@@ -399,4 +399,4 @@ FodyWeavers.xsd
 .env
 
 # Configuration files with sensitive data
-appsettings.json
+CryptoManager.Net.Server/CryptoManager.Net/appsettings.json

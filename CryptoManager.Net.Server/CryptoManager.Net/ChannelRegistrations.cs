@@ -19,5 +19,7 @@ namespace CryptoManager.Net
 
         public static Channel<PublishItem<PendingSolanaAssetCalculation>> SolanaAssetCalculationChannel { get; } = Channel.CreateBounded<PublishItem<PendingSolanaAssetCalculation>>(GetChannelOptions(100));
 
+        public static Channel<PublishItem<PendingPoolPairCalculation>> PoolPairCalculationChannel { get; } = Channel.CreateBounded<PublishItem<PendingPoolPairCalculation>>(GetChannelOptions(100));
+
     }
 }

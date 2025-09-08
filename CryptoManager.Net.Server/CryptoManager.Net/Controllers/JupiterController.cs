@@ -229,4 +229,72 @@ public class JupiterController : ApiController
             return ApiResult<JupiterTokenPrice?>.Error(ErrorType.Unknown, null, "An unexpected error occurred while fetching token price");
         }
     }
+
+    /// <summary>
+    /// Gets a swap quote with route information from Jupiter
+    /// </summary>
+    /// <param name="inputMint">Input token mint address</param>
+    /// <param name="outputMint">Output token mint address</param>
+    /// <param name="amount">Amount to swap (in smallest unit)</param>
+    /// <param name="slippageBps">Slippage in basis points (default: 50 = 0.5%)</param>
+    /// <returns>Swap quote with route information</returns>
+    [HttpGet("swap-quote")]
+    [ProducesResponseType(typeof(ApiResult<JupiterSwapQuote?>), 200)]
+    [ProducesResponseType(typeof(ApiResult<JupiterSwapQuote?>), 400)]
+    [ProducesResponseType(typeof(ApiResult<JupiterSwapQuote?>), 500)]
+    public async Task<ApiResult<JupiterSwapQuote?>> GetSwapQuote(
+        [FromQuery] string inputMint,
+        [FromQuery] string outputMint,
+        [FromQuery] string amount,
+        [FromQuery] int slippageBps = 50)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(inputMint))
+            {
+                return ApiResult<JupiterSwapQuote?>.Error(ErrorType.Unknown, "INVALID_INPUT_MINT", "Input mint address is required");
+            }
+
+            if (string.IsNullOrWhiteSpace(outputMint))
+            {
+                return ApiResult<JupiterSwapQuote?>.Error(ErrorType.Unknown, "INVALID_OUTPUT_MINT", "Output mint address is required");
+            }
+
+            if (string.IsNullOrWhiteSpace(amount))
+            {
+                return ApiResult<JupiterSwapQuote?>.Error(ErrorType.Unknown, "INVALID_AMOUNT", "Amount is required");
+            }
+
+            if (slippageBps < 0 || slippageBps > 10000)
+            {
+                return ApiResult<JupiterSwapQuote?>.Error(ErrorType.Unknown, "INVALID_SLIPPAGE", "Slippage must be between 0 and 10000 basis points");
+            }
+
+            _logger.LogInformation("Fetching swap quote from Jupiter API: {InputMint} -> {OutputMint}, Amount: {Amount}, Slippage: {SlippageBps}bps", 
+                inputMint, outputMint, amount, slippageBps);
+
+            var quote = await _jupiterTokenService.GetSwapQuoteAsync(inputMint, outputMint, amount, slippageBps);
+
+            if (quote == null)
+            {
+                _logger.LogWarning("No swap quote found for {InputMint} -> {OutputMint}", inputMint, outputMint);
+                return ApiResult<JupiterSwapQuote?>.Error(ErrorType.Unknown, "NO_QUOTE_FOUND", "No swap quote found for the specified tokens and amount");
+            }
+
+            _logger.LogInformation("Successfully retrieved swap quote: {InputMint} -> {OutputMint}, Output: {OutAmount}, Routes: {RouteCount}", 
+                inputMint, outputMint, quote.OutAmount, quote.RoutePlan.Length);
+
+            return ApiResult<JupiterSwapQuote?>.Ok(quote);
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger.LogError(ex, "Failed to fetch swap quote from Jupiter API: {InputMint} -> {OutputMint}", inputMint, outputMint);
+            return ApiResult<JupiterSwapQuote?>.Error(ErrorType.Unknown, "JUPITER_API_ERROR", ex.Message);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error while fetching swap quote: {InputMint} -> {OutputMint}", inputMint, outputMint);
+            return ApiResult<JupiterSwapQuote?>.Error(ErrorType.Unknown, null, "An unexpected error occurred while fetching swap quote");
+        }
+    }
 }

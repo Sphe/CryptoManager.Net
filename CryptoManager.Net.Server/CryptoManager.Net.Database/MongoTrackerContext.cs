@@ -17,6 +17,7 @@ namespace CryptoManager.Net.Database
         public IMongoCollection<FiatPrice> FiatPrices => _database.GetCollection<FiatPrice>("fiatPrices");
         public IMongoCollection<ExchangeAssetStats> ExchangeAssetStats => _database.GetCollection<ExchangeAssetStats>("exchangeAssetStats");
         public IMongoCollection<AssetStats> AssetStats => _database.GetCollection<AssetStats>("assetStats");
+        public IMongoCollection<PoolPairs> PoolPairs => _database.GetCollection<PoolPairs>("poolPairs");
         public IMongoCollection<User> Users => _database.GetCollection<User>("users");
         public IMongoCollection<UserQuickViewConfiguration> UserQuickViewConfigurations => _database.GetCollection<UserQuickViewConfiguration>("userQuickViewConfigurations");
         public IMongoCollection<RefreshToken> RefreshTokens => _database.GetCollection<RefreshToken>("refreshTokens");
@@ -72,6 +73,25 @@ namespace CryptoManager.Net.Database
             await AssetStats.Indexes.CreateOneAsync(
                 new CreateIndexModel<AssetStats>(
                     Builders<AssetStats>.IndexKeys.Ascending(x => x.ContractAddresses)
+                )
+            );
+
+            // Create indexes for PoolPairs
+            await PoolPairs.Indexes.CreateOneAsync(
+                new CreateIndexModel<PoolPairs>(
+                    Builders<PoolPairs>.IndexKeys.Ascending(x => x.Asset)
+                )
+            );
+
+            await PoolPairs.Indexes.CreateOneAsync(
+                new CreateIndexModel<PoolPairs>(
+                    Builders<PoolPairs>.IndexKeys.Ascending(x => x.ContractAddress)
+                )
+            );
+
+            await PoolPairs.Indexes.CreateOneAsync(
+                new CreateIndexModel<PoolPairs>(
+                    Builders<PoolPairs>.IndexKeys.Ascending(x => x.UpdateTime)
                 )
             );
 

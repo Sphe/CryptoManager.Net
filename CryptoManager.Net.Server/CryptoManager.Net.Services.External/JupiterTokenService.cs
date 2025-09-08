@@ -49,6 +49,22 @@ public interface IJupiterTokenService
     Task<JupiterTokenPrice?> GetTokenPriceAsync(
         string tokenAddress, 
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gets a swap quote with route information from Jupiter API
+    /// </summary>
+    /// <param name="inputMint">Input token mint address</param>
+    /// <param name="outputMint">Output token mint address</param>
+    /// <param name="amount">Amount to swap (in smallest unit)</param>
+    /// <param name="slippageBps">Slippage in basis points (default: 50 = 0.5%)</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    /// <returns>Swap quote with route information, or null if not found</returns>
+    Task<JupiterSwapQuote?> GetSwapQuoteAsync(
+        string inputMint,
+        string outputMint,
+        string amount,
+        int slippageBps = 50,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -310,6 +326,64 @@ public class JupiterTokenService : IJupiterTokenService, IDisposable
         // Record this API call
         _apiCallTimes.Enqueue(now);
         _logger.LogDebug("API call recorded. Current calls in window: {CallCount}", _apiCallTimes.Count);
+    }
+
+    /// <summary>
+    /// Gets a swap quote with route information from Jupiter API
+    /// </summary>
+    public async Task<JupiterSwapQuote?> GetSwapQuoteAsync(
+        string inputMint,
+        string outputMint,
+        string amount,
+        int slippageBps = 50,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await EnforceRateLimitAsync(cancellationToken);
+
+            var cacheKey = $"{PRICE_CACHE_KEY_PREFIX}swap_{inputMint}_{outputMint}_{amount}_{slippageBps}";
+            
+            if (_cache.TryGetValue(cacheKey, out JupiterSwapQuote? cachedQuote))
+            {
+                _logger.LogDebug("Returning swap quote from cache for {InputMint} -> {OutputMint}", inputMint, outputMint);
+                return cachedQuote;
+            }
+
+            var url = $"{JUPITER_API_BASE_URL}/swap/v1/quote" +
+                     $"?inputMint={Uri.EscapeDataString(inputMint)}" +
+                     $"&outputMint={Uri.EscapeDataString(outputMint)}" +
+                     $"&amount={Uri.EscapeDataString(amount)}" +
+                     $"&slippageBps={slippageBps}";
+
+            _logger.LogDebug("Fetching swap quote from Jupiter API: {Url}", url);
+
+            var response = await _httpClient.GetAsync(url, cancellationToken);
+            
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("Failed to get swap quote from Jupiter API. Status: {StatusCode}, Reason: {ReasonPhrase}", 
+                    response.StatusCode, response.ReasonPhrase);
+                return null;
+            }
+
+            var jsonContent = await response.Content.ReadAsStringAsync(cancellationToken);
+            var quote = JsonSerializer.Deserialize<JupiterSwapQuote>(jsonContent, _jsonOptions);
+
+            if (quote != null)
+            {
+                _cache.Set(cacheKey, quote, PriceCacheExpiration);
+                _logger.LogDebug("Successfully fetched and cached swap quote for {InputMint} -> {OutputMint}. Output amount: {OutAmount}", 
+                    inputMint, outputMint, quote.OutAmount);
+            }
+
+            return quote;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error fetching swap quote for {InputMint} -> {OutputMint}", inputMint, outputMint);
+            return null;
+        }
     }
 
     /// <summary>

@@ -22,6 +22,9 @@ namespace CryptoManager.Net.Processor.AssetCalculation
         private readonly Queue<DateTime> _jupiterCallTimes = new();
         private readonly int _maxCallsPerMinute = 10;
         private readonly TimeSpan _rateLimitWindow = TimeSpan.FromMinutes(1);
+        
+        // Cache for Jupiter tokens to avoid repeated API calls
+        private readonly Dictionary<string, JupiterToken> _jupiterTokenCache = new();
 
         public PoolPairProcessService(
             ILogger<PoolPairProcessService> logger,
@@ -62,6 +65,90 @@ namespace CryptoManager.Net.Processor.AssetCalculation
             // Record this call time
             _jupiterCallTimes.Enqueue(now);
             return true;
+        }
+
+        private async Task<JupiterToken?> GetJupiterTokenAsync(string mintAddress)
+        {
+            if (_jupiterTokenCache.TryGetValue(mintAddress, out var cachedToken))
+            {
+                return cachedToken;
+            }
+
+            try
+            {
+                var tokens = await _jupiterTokenService.GetVerifiedTokensAsync(cancellationToken: _stoppingToken);
+                var token = tokens.FirstOrDefault(t => t.Address == mintAddress);
+                
+                if (token != null)
+                {
+                    _jupiterTokenCache[mintAddress] = token;
+                }
+                
+                return token;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, $"Failed to get Jupiter token for mint {mintAddress}");
+                return null;
+            }
+        }
+
+        private async Task UpdateInventoryPoolPairsAsync(MongoTrackerContext context, CryptoManager.Net.Models.JupiterSwapInfo swapInfo)
+        {
+            try
+            {
+                var contractAddress = swapInfo.AmmKey; // Using AmmKey as the contract address
+                
+                // Get token information for both tokens
+                var tokenA = await GetJupiterTokenAsync(swapInfo.InputMint);
+                var tokenB = await GetJupiterTokenAsync(swapInfo.OutputMint);
+
+                var inventoryItem = new InventoryPoolPairs
+                {
+                    Id = contractAddress,
+                    ContractAddress = contractAddress,
+                    AmmKey = swapInfo.AmmKey,
+                    Label = swapInfo.Label,
+                    TokenA = new PoolToken
+                    {
+                        Mint = swapInfo.InputMint,
+                        Symbol = tokenA?.Symbol ?? "Unknown",
+                        Name = tokenA?.Name ?? "Unknown",
+                        Decimals = tokenA?.Decimals ?? 0,
+                        LogoUri = tokenA?.LogoUri
+                    },
+                    TokenB = new PoolToken
+                    {
+                        Mint = swapInfo.OutputMint,
+                        Symbol = tokenB?.Symbol ?? "Unknown",
+                        Name = tokenB?.Name ?? "Unknown",
+                        Decimals = tokenB?.Decimals ?? 0,
+                        LogoUri = tokenB?.LogoUri
+                    },
+                    FirstDiscovered = DateTime.UtcNow,
+                    LastSeen = DateTime.UtcNow,
+                    DiscoveryCount = 1
+                };
+
+                // Try to upsert the inventory item
+                var filter = Builders<InventoryPoolPairs>.Filter.Eq(x => x.ContractAddress, contractAddress);
+                var update = Builders<InventoryPoolPairs>.Update
+                    .SetOnInsert(x => x.Id, inventoryItem.Id)
+                    .SetOnInsert(x => x.ContractAddress, inventoryItem.ContractAddress)
+                    .SetOnInsert(x => x.AmmKey, inventoryItem.AmmKey)
+                    .SetOnInsert(x => x.Label, inventoryItem.Label)
+                    .SetOnInsert(x => x.TokenA, inventoryItem.TokenA)
+                    .SetOnInsert(x => x.TokenB, inventoryItem.TokenB)
+                    .SetOnInsert(x => x.FirstDiscovered, inventoryItem.FirstDiscovered)
+                    .Set(x => x.LastSeen, DateTime.UtcNow)
+                    .Inc(x => x.DiscoveryCount, 1);
+
+                await context.InventoryPoolPairs.UpdateOneAsync(filter, update, new UpdateOptions { IsUpsert = true });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, $"Failed to update inventory for pool {swapInfo.AmmKey}");
+            }
         }
 
         public async Task ExecuteAsync(CancellationToken ct)
@@ -155,6 +242,12 @@ namespace CryptoManager.Net.Processor.AssetCalculation
                             };
 
                             poolPairs.Add(poolPair);
+
+                            // Update inventory for each pool in the route plan
+                            foreach (var routePlan in quote.RoutePlan)
+                            {
+                                await UpdateInventoryPoolPairsAsync(context, routePlan.SwapInfo);
+                            }
                         }
                         else
                         {

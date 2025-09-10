@@ -18,6 +18,7 @@ namespace CryptoManager.Net.Database
         public IMongoCollection<ExchangeAssetStats> ExchangeAssetStats => _database.GetCollection<ExchangeAssetStats>("exchangeAssetStats");
         public IMongoCollection<AssetStats> AssetStats => _database.GetCollection<AssetStats>("assetStats");
         public IMongoCollection<PoolPairs> PoolPairs => _database.GetCollection<PoolPairs>("poolPairs");
+        public IMongoCollection<InventoryPoolPairs> InventoryPoolPairs => _database.GetCollection<InventoryPoolPairs>("inventoryPoolPairs");
         public IMongoCollection<User> Users => _database.GetCollection<User>("users");
         public IMongoCollection<UserQuickViewConfiguration> UserQuickViewConfigurations => _database.GetCollection<UserQuickViewConfiguration>("userQuickViewConfigurations");
         public IMongoCollection<RefreshToken> RefreshTokens => _database.GetCollection<RefreshToken>("refreshTokens");
@@ -145,6 +146,14 @@ namespace CryptoManager.Net.Database
             await UserExternalBalances.Indexes.CreateOneAsync(
                 new CreateIndexModel<UserExternalBalance>(
                     Builders<UserExternalBalance>.IndexKeys.Ascending(x => x.UserId)
+                )
+            );
+
+            // Create unique index for InventoryPoolPairs on contractAddress
+            await InventoryPoolPairs.Indexes.CreateOneAsync(
+                new CreateIndexModel<InventoryPoolPairs>(
+                    Builders<InventoryPoolPairs>.IndexKeys.Ascending(x => x.ContractAddress),
+                    new CreateIndexOptions { Unique = true }
                 )
             );
         }

@@ -294,9 +294,27 @@ namespace CryptoManager.Net.Controllers
                 orders = await client.GetSpotOpenOrdersAsync(new GetOpenOrdersRequest(new SharedSymbol(TradingMode.Spot, symbolData[1], symbolData[2])), apiKeys.Select(x => x.Exchange));
             }
 
-// TODO: If open orders doesn't return an order we currently have as open we should close it
             var dbOrders = orders.Where(x => x.Success).SelectMany(x => x.Data.Select(y => ParseOrder(x.Exchange, y))).ToArray();
             await _dbContext.BulkInsertOrUpdateAsync(dbOrders);
+
+            // For each exchange that returned a successful response, mark any locally-stored Open orders
+            // that were NOT in the exchange response as Cancelled (they were cancelled/filled externally).
+            var successfulExchanges = orders.Where(x => x.Success).Select(x => x.Exchange).ToHashSet();
+            var returnedIds = dbOrders.Select(x => x.Id).ToHashSet();
+
+            var staleOrderFilter = Builders<UserOrder>.Filter.And(
+                Builders<UserOrder>.Filter.Eq(x => x.UserId, UserId),
+                Builders<UserOrder>.Filter.Eq(x => x.Status, SharedOrderStatus.Open),
+                Builders<UserOrder>.Filter.In(x => x.Exchange, successfulExchanges),
+                Builders<UserOrder>.Filter.Nin(x => x.Id, returnedIds)
+            );
+
+            if (symbolData != null)
+                staleOrderFilter = Builders<UserOrder>.Filter.And(staleOrderFilter,
+                    Builders<UserOrder>.Filter.Regex(x => x.SymbolId, new BsonRegularExpression($"{symbolData[1]}-{symbolData[2]}$")));
+
+            var cancelUpdate = Builders<UserOrder>.Update.Set(x => x.Status, SharedOrderStatus.Cancelled);
+            await _dbContext.UserOrders.UpdateManyAsync(staleOrderFilter, cancelUpdate);
 
 // TODO: Ignore errors here because they're probably because of symbol not existing. Should first check if the symbol exists on the exchange
             //var errors = orders.Where(x => !x).Select(x => new ApiError(x.Error!.ErrorType, x.Error.ErrorCode, x.Exchange + ": " +x.Error.Message));
